@@ -305,9 +305,9 @@ public class JiraService {
                 summary = ScanUtils.getScaSummaryIssueKey(request, issue, issuePrefix, issuePostfix);
             } else {
                 if (useBranch) {
-                    summary = String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY_WITH_BRANCH, issuePrefix, vulnerability, filename, branch, issuePostfix);
+                    summary = String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY_WITH_BRANCH, issuePrefix, vulnerability, request.getProject(), filename, branch, issuePostfix);
                 } else {
-                    summary = String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY, issuePrefix, vulnerability, filename, issuePostfix);
+                    summary = String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY, issuePrefix, vulnerability, request.getProject(), filename, issuePostfix);
                 }
             }
             String fileUrl = ScanUtils.getFileUrl(request, issue.getFilename());
@@ -895,11 +895,11 @@ public class JiraService {
             String key;
             if (useBranch) {
                 key = issue.getScaDetails() == null
-                        ? String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY_WITH_BRANCH, issuePrefix, issue.getVulnerability(), issue.getFilename(), request.getBranch(), issuePostfix)
+                        ? String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY_WITH_BRANCH, issuePrefix, issue.getVulnerability(), request.getProject(), issue.getFilename(), request.getBranch(), issuePostfix)
                         : getScaDetailsIssueTitleFormat(request, issuePrefix, issuePostfix, issue);
             } else {
                 key = issue.getScaDetails() == null
-                        ? String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY, issuePrefix, issue.getVulnerability(), issue.getFilename(), issuePostfix)
+                        ? String.format(JiraConstants.JIRA_ISSUE_TITLE_KEY, issuePrefix, issue.getVulnerability(), request.getProject(), issue.getFilename(), issuePostfix)
                         : getScaDetailsIssueTitleWithoutBranchFormat(request, issuePrefix, issuePostfix, issue);
             }
             map.put(key, issue);
