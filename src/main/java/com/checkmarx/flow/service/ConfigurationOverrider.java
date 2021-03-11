@@ -1,23 +1,30 @@
 package com.checkmarx.flow.service;
 
+import com.checkmarx.configprovider.ConfigProvider;
 import com.checkmarx.flow.config.FindingSeverity;
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.config.CxIntegrationsProperties;
+import com.checkmarx.flow.config.external.ASTConfig;
+import com.checkmarx.flow.config.external.CxGoConfigFromWebService;
+import com.checkmarx.flow.constants.FlowConstants;
 import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.ControllerRequest;
 import com.checkmarx.flow.dto.FlowOverride;
 import com.checkmarx.flow.dto.ScanRequest;
+import com.checkmarx.flow.exception.MachinaRuntimeException;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.config.ScaConfig;
-import com.checkmarx.sdk.config.ScaProperties;
-import com.checkmarx.sdk.dto.CxConfig;
-import com.checkmarx.sdk.dto.Sca;
+import com.checkmarx.sdk.config.*;
+import com.checkmarx.sdk.dto.sast.CxConfig;
+import com.checkmarx.sdk.dto.sast.Filter;
+import com.checkmarx.sdk.dto.filtering.EngineFilterConfiguration;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
+import com.checkmarx.sdk.dto.sca.Sca;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
@@ -34,30 +41,40 @@ public class ConfigurationOverrider {
             BugTracker.Type.GITHUBPULL,
             BugTracker.Type.GITLABMERGE));
 
+    private static final String TEAM_REPORT_KEY = "team";
+
     private final FlowProperties flowProperties;
-    private final ScaProperties scaProperties;
+    private final CxIntegrationsProperties cxIntegrationsProperties;
     private final SCAScanner scaScanner;
     private final SastScanner sastScanner;
-
+    private final CxGoScanner cxgoScanner;
+    private final ScaConfigurationOverrider scaConfigOverrider;
+    private final ReposManagerService reposManagerService;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
+    
     public ScanRequest overrideScanRequestProperties(CxConfig override, ScanRequest request) {
-        if (override == null || request == null || Boolean.FALSE.equals(override.getActive())) {
-            return request;
+        if (request == null) {
+            log.warn("Unable to override scan request properties. Scan request is null.");
+            return null;
         }
 
         Map<String, String> overrideReport = new HashMap<>();
-        overrideMainProperties(override, request, overrideReport);
+        applyCxGoDynamicConfig(overrideReport, request);
+        scaConfigOverrider.initScaConfig(request);
+
+        ConfigProvider configProvider = ConfigProvider.getInstance();
+        boolean noOverridesArePresent = !configProviderResultsAreAvailable(configProvider) && !configAsCodeIsAvailable(override);
+        if (noOverridesArePresent) {
+            log.debug("No scan request property overrides were detected.");
+            return request;
+        }
+
+        overrideMainProperties(Optional.ofNullable(override), request, overrideReport);
 
         try {
-            Optional.ofNullable(override.getAdditionalProperties()).ifPresent(ap -> {
-                Object flow = ap.get("cxFlow");
-                ObjectMapper mapper = new ObjectMapper();
-                Optional.ofNullable(mapper.convertValue(flow, FlowOverride.class)).ifPresent(flowOverride ->
-                    applyFlowOverride(flowOverride, request, overrideReport)
-                );
+            overrideAdditionalProperties(override, request, overrideReport);
 
-            });
-
-            String overriddenProperties = convertMapToString(overrideReport);
+            String overriddenProperties = ScanUtils.convertMapToString(overrideReport);
             log.info("The following properties were overridden by config-as-code file: {}", overriddenProperties);
 
         } catch (IllegalArgumentException e) {
@@ -66,51 +83,80 @@ public class ConfigurationOverrider {
         return request;
     }
 
-    private void applyFlowOverride(FlowOverride fo, ScanRequest request, Map<String, String> overrideReport) {
-        BugTracker bt = getBugTracker(fo, request, overrideReport);
+    private void overrideAdditionalProperties(CxConfig override, ScanRequest request, Map<String, String> overrideReport) {
+        Optional.ofNullable(override)
+            .map(CxConfig::getAdditionalProperties).ifPresent(ap -> {
+            Object flow = ap.get("cxFlow");
+            ObjectMapper mapper = new ObjectMapper();
+            Optional.ofNullable(mapper.convertValue(flow, FlowOverride.class)).ifPresent(flowOverride ->
+                applyFlowOverride(flowOverride, request, overrideReport)
+            );
+        });
+    }
+
+    private boolean configProviderResultsAreAvailable(ConfigProvider configProvider) {
+        return configProvider.hasAnyConfiguration(MDC.get(FlowConstants.MAIN_MDC_ENTRY));
+    }
+
+    private boolean configAsCodeIsAvailable(CxConfig override) {
+        // Config-as-code should be enabled if the 'active' property is either
+        // true or null => checking against Boolean.FALSE.
+        return override != null && !Boolean.FALSE.equals(override.getActive());
+    }
+
+    private void applyFlowOverride(FlowOverride override, ScanRequest request, Map<String, String> overrideReport) {
+        BugTracker bt = getBugTracker(override, request, overrideReport);
         /*Override only applicable to Simple JIRA bug*/
-        if (BugTracker.Type.JIRA.equals(bt.getType()) && fo.getJira() != null) {
-            overrideJiraBugProperties(fo, bt);
+        if (BugTracker.Type.JIRA.equals(bt.getType()) && override.getJira() != null) {
+            overrideJiraBugProperties(override, bt);
         }
 
         request.setBugTracker(bt);
 
-        Optional.ofNullable(fo.getApplication())
+        Optional.ofNullable(override.getApplication())
                 .filter(StringUtils::isNotBlank)
                 .ifPresent(a -> {
                     request.setApplication(a);
                     overrideReport.put("application", a);
                 });
 
-        Optional.ofNullable(fo.getBranches())
+        Optional.ofNullable(override.getBranches())
                 .filter(CollectionUtils::isNotEmpty)
                 .ifPresent(br -> {
                     request.setActiveBranches(br);
                     overrideReport.put("active branches", Arrays.toString(br.toArray()));
                 });
 
-        Optional.ofNullable(fo.getEmails())
+        Optional.ofNullable(override.getEmails())
                 .ifPresent(e -> request.setEmail(e.isEmpty() ? null : e));
 
-        overrideFilters(fo, request, overrideReport);
+        overrideFilters(override, request, overrideReport);
 
-        overrideThresholds(fo, overrideReport, request);
+        overrideThresholds(override, overrideReport, request);
 
-        Optional.ofNullable(fo.getVulnerabilityScanners()).ifPresent(vulnerabilityScanners -> {
-            List<VulnerabilityScanner> scanRequestVulnerabilityScanner = new ArrayList<>();
+        overrideEnabledVulnerabilityScanners(override, request, overrideReport);
+    }
 
-            vulnerabilityScanners.forEach(vs -> {
-                if (vs.equalsIgnoreCase(ScaProperties.CONFIG_PREFIX)) {
-                    scanRequestVulnerabilityScanner.add(scaScanner);
+    private void overrideEnabledVulnerabilityScanners(FlowOverride override,
+                                                      ScanRequest request,
+                                                      Map<String, String> overrideReport) {
+        Optional.ofNullable(override.getVulnerabilityScanners()).ifPresent(vulnerabilityScanners -> {
+            List<VulnerabilityScanner> scannersForRequest = new ArrayList<>();
+
+            vulnerabilityScanners.forEach(scannerName -> {
+                if (scannerName.equalsIgnoreCase(ScaProperties.CONFIG_PREFIX)) {
+                    scannersForRequest.add(scaScanner);
                 }
-                if (vs.equalsIgnoreCase(CxProperties.CONFIG_PREFIX)) {
-                    scanRequestVulnerabilityScanner.add(sastScanner);
+                if (scannerName.equalsIgnoreCase(CxProperties.CONFIG_PREFIX)) {
+                    scannersForRequest.add(sastScanner);
+                }
+                if (scannerName.equalsIgnoreCase(CxGoProperties.CONFIG_PREFIX)) {
+                    scannersForRequest.add(cxgoScanner);
                 }
             });
-            request.setVulnerabilityScanners(scanRequestVulnerabilityScanner);
+            request.setVulnerabilityScanners(scannersForRequest);
             overrideReport.put("vulnerabilityScanners", vulnerabilityScanners.toString());
         });
-
     }
 
     private void overrideThresholds(FlowOverride flowOverride, Map<String, String> overrideReport, ScanRequest request) {
@@ -118,7 +164,7 @@ public class ConfigurationOverrider {
             Map<FindingSeverity, Integer> thresholdsMap = getThresholdsMap(thresholds);
             if (!thresholdsMap.isEmpty()) {
                 request.setThresholds(thresholdsMap);
-                overrideReport.put("thresholds", convertMapToString(thresholdsMap));
+                overrideReport.put("thresholds", ScanUtils.convertMapToString(thresholdsMap));
             }
         });
     }
@@ -130,13 +176,17 @@ public class ConfigurationOverrider {
                     override.getCwe(),
                     override.getCategory(),
                     override.getStatus());
-            FilterConfiguration filter = filterFactory.getFilter(controllerRequest, null);
-            request.setFilter(filter);
+            FilterConfiguration filterConfig = filterFactory.getFilter(controllerRequest, null);
+            request.setFilter(filterConfig);
 
             String filterDescr;
-            if (CollectionUtils.isNotEmpty(filter.getSimpleFilters())) {
-                filterDescr = filter.getSimpleFilters()
-                        .stream()
+            List<Filter> simpleFilters = Optional.ofNullable(filterConfig)
+                    .map(FilterConfiguration::getSastFilters)
+                    .map(EngineFilterConfiguration::getSimpleFilters)
+                    .orElse(null);
+
+            if (CollectionUtils.isNotEmpty(simpleFilters)) {
+                filterDescr = simpleFilters.stream()
                         .map(Object::toString)
                         .collect(Collectors.joining(","));
             } else {
@@ -146,8 +196,8 @@ public class ConfigurationOverrider {
         });
     }
 
-    private void overrideMainProperties(CxConfig override, ScanRequest request, Map<String, String> overrideReport) {
-        Optional.ofNullable(override.getProject())
+    private void overrideMainProperties(Optional<CxConfig> override, ScanRequest request, Map<String, String> overrideReport) {
+        override.map(CxConfig::getProject)
                 .filter(StringUtils::isNotBlank)
                 .ifPresent(p -> {
                     /*Replace ${repo} and ${branch}  with the actual reponame and branch - then strip out non-alphanumeric (-_ are allowed)*/
@@ -157,13 +207,13 @@ public class ConfigurationOverrider {
                     request.setProject(project);
                     overrideReport.put("project", project);
                 });
-        Optional.ofNullable(override.getTeam())
+        override.map(CxConfig::getTeam)
                 .filter(StringUtils::isNotBlank)
                 .ifPresent(t -> {
                     request.setTeam(t);
-                    overrideReport.put("team", t);
+                    overrideReport.put(TEAM_REPORT_KEY, t);
                 });
-        Optional.ofNullable(override.getSast()).ifPresent(s -> {
+        override.map(CxConfig::getSast).ifPresent(s -> {
             Optional.ofNullable(s.getIncremental()).ifPresent(si -> {
                 request.setIncremental(si);
                 overrideReport.put("incremental", si.toString());
@@ -187,65 +237,92 @@ public class ConfigurationOverrider {
                 request.setExcludeFiles(Arrays.asList(sf.split(",")));
                 overrideReport.put("exclude files", sf);
             });
+            Optional.ofNullable(s.getEngineConfiguration()).ifPresent(scanConfiguration -> {
+                request.setScanConfiguration(scanConfiguration);
+                overrideReport.put("scan configuration", scanConfiguration);
+            });
         });
-        overridePropertiesSca(Optional.ofNullable(override.getSca()), overrideReport, request);
+        overrideUsingConfigProvider(override, overrideReport, request);
     }
 
-    private void overridePropertiesSca(Optional<Sca> sca, Map<String, String> overrideReport, ScanRequest request) {
-        if (!sca.isPresent()) {
-          return;
+    private void overrideUsingConfigProvider(Optional<CxConfig> fallback, Map<String, String> overrideReport, ScanRequest request) {
+        ConfigProvider configProvider = ConfigProvider.getInstance();
+        String uid = MDC.get(FlowConstants.MAIN_MDC_ENTRY);
+
+        ScaConfig scaConfiguration = configProvider.getConfiguration(uid, ScaProperties.CONFIG_PREFIX, ScaConfig.class);
+        if (scaConfiguration != null) {
+            log.info("Overriding SCA properties from config provider configuration");
+            scaConfigOverrider.overrideScanRequestProperties(scaConfiguration, request, overrideReport);
+        } else {
+            Sca scaPropertiesFromConfigAsCode = fallback.map(CxConfig::getSca).orElse(null);
+            scaConfigOverrider.overrideScanRequestProperties(scaPropertiesFromConfigAsCode, request, overrideReport);
         }
 
-        ScaConfig scaConfig = ScaConfig.builder()
-                .build();
+        ASTConfig astConfiguration = configProvider.getConfiguration(uid, AstProperties.CONFIG_PREFIX, ASTConfig.class);
+        if (astConfiguration != null) {
+            log.info("Overriding AST properties from config provider configuration");
+            overridePropertiesAst(astConfiguration, overrideReport, request);
+        }
+    }
 
-        sca.map(Sca::getAccessControlUrl).ifPresent(accessControlUrl -> {
-            scaConfig.setAccessControlUrl(accessControlUrl);
-            overrideReport.put("accessControlUrl", accessControlUrl);
-        });
+    private void applyCxGoDynamicConfig(Map<String, String> overrideReport, ScanRequest request) {
+        if (cxIntegrationsProperties.isReadMultiTenantConfiguration()) {
+            String orgId = Optional.ofNullable(request.getOrganizationId())
+                    .orElseThrow(() -> new MachinaRuntimeException(
+                            "Organization id is missing for SCM: " + request.getRepoType().getRepository()));
 
-        sca.map(Sca::getApiUrl).ifPresent(apiUrl -> {
-            scaConfig.setApiUrl(apiUrl);
-            overrideReport.put("apiUrl", apiUrl);
-        });
+            CxGoConfigFromWebService cxgoConfig = reposManagerService.getCxGoDynamicConfig(request.getGitUrl(), orgId);
 
-        sca.map(Sca::getAppUrl).ifPresent(appUrl -> {
-            scaConfig.setAppUrl(appUrl);
-            overrideReport.put("appUrl", appUrl);
-        });
+            if (cxgoConfig == null) {
+                log.error("Multi Tenant mode: missing CxGo configuration in Repos Manager Service. Working with Multi Tenant = false ");
+                return;
+            }
 
-        sca.map(Sca::getTenant).ifPresent(tenant -> {
-            scaConfig.setTenant(tenant);
-            overrideReport.put("tenant", tenant);
-        });
+            String className = CxGoConfigFromWebService.class.getSimpleName();
+            log.info("Applying {} configuration.", className);
+            Optional.ofNullable(cxgoConfig.getTeam())
+                    .filter(StringUtils::isNotEmpty)
+                    .ifPresent(team -> {
+                        request.setTeam(team);
+                        log.info("Using team from {}", className);
+                        overrideReport.put(TEAM_REPORT_KEY, team);
+                    });
+            Optional.ofNullable(cxgoConfig.getCxgoToken())
+                    .filter(StringUtils::isNotEmpty)
+                    .ifPresent(secret -> {
+                        request.setScannerApiSec(secret);
+                        log.info("Using scanner API secret from {}", className);
+                        overrideReport.put("scannerApiSec", "<actually it's a secret>");
+                    });
+            Optional.ofNullable(cxgoConfig.getScmAccessToken())
+                    .filter(StringUtils::isNotEmpty)
+                    .ifPresent(token -> {
+                        String authUrl = gitAuthUrlGenerator.addCredToUrl
+                                (request.getRepoType(), request.getGitUrl(), cxgoConfig.getScmAccessToken());
+                        request.setRepoUrlWithAuth(authUrl);
+                        log.info("Using SCM token from {}", className);
+                        overrideReport.put("SCM token", "********");
+                    });
+        }
+    }
 
-        sca.map(Sca::getThresholdsSeverity).ifPresent(thresholdsSeverity -> {
-            scaConfig.setThresholdsSeverity(thresholdsSeverity);
-            overrideReport.put("thresholdsSeverity", convertMapToString(thresholdsSeverity));
-        });
+    private void overridePropertiesAst(ASTConfig astConfiguration, Map<String, String> overrideReport, ScanRequest request) {
+        writeAstPropertiesToReport(astConfiguration, overrideReport);
+        request.setAstConfig(astConfiguration);
+    }
 
-        sca.map(Sca::getThresholdsScore).ifPresent(thresholdsScore -> {
-            scaConfig.setThresholdsScore(thresholdsScore);
-            overrideReport.put("thresholdsScore", String.valueOf(thresholdsScore));
-        });
-
-        sca.map(Sca::getFilterSeverity).ifPresent(filterSeverity -> {
-            scaConfig.setFilterSeverity(filterSeverity);
-            overrideReport.put("filterSeverity", filterSeverity.toString());
-        });
-
-        sca.map(Sca::getFilterScore).ifPresent(filterScore -> {
-            scaConfig.setFilterScore(filterScore);
-            overrideReport.put("filterScore", String.valueOf(filterScore));
-        });
-
-        request.setScaConfig(scaConfig);
+    private void writeAstPropertiesToReport(ASTConfig astConfiguration, Map<String, String> overrideReport) {
+        overrideReport.put("AST apiUrl", astConfiguration.getApiUrl());
+        overrideReport.put("AST preset", astConfiguration.getPreset());
+        overrideReport.put("AST incremental", String.valueOf(astConfiguration.isIncremental()));
     }
 
     /**
      * Override scan request details as per file/blob (MachinaOverride)
      */
     public ScanRequest overrideScanRequestProperties(FlowOverride override, ScanRequest request) {
+        scaConfigOverrider.initScaConfig(request);
+
         if (override == null) {
             return request;
         }
@@ -324,12 +401,13 @@ public class ConfigurationOverrider {
 
         String cannotOverrideReason = null;
 
-        if (comingFromPullRequest) {
-            // Don't override bug tracker type if the scan is initiated by a pull request.
-            // Otherwise bug tracker events won't be triggered.
-            cannotOverrideReason = "scan was initiated by pull request";
-        } else if (StringUtils.isEmpty(bugTrackerNameOverride)) {
+        if (StringUtils.isEmpty(bugTrackerNameOverride)) {
             cannotOverrideReason = "no bug tracker override is defined";
+        } else if (comingFromPullRequest && !bugTrackerNameOverride.equalsIgnoreCase(BugTracker.Type.NONE.toString())) {
+            // if Bug-tracker override is 'NONE' - always override
+            // If not, don't override bug tracker type if the scan is initiated by a pull request.
+            // Otherwise bug tracker events won't be triggered.
+            cannotOverrideReason = "scan was initiated by pull request and the overriding value is not NONE";
         } else if (bugTrackerNameOverride.equalsIgnoreCase(currentBugTrackerType.toString())) {
             cannotOverrideReason = "bug tracker type in override is the same as in scan request";
         }
@@ -340,13 +418,6 @@ public class ConfigurationOverrider {
 
         return cannotOverrideReason == null;
     }
-
-    private static String convertMapToString(Map<?, ?> map) {
-        return map.keySet().stream()
-                .map(key -> key + "=" + map.get(key))
-                .collect(Collectors.joining(", ", "{", "}"));
-    }
-
 
     private static void overrideJiraBugProperties(FlowOverride override, BugTracker bt) {
         FlowOverride.Jira jira = override.getJira();

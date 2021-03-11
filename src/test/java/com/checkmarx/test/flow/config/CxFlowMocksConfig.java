@@ -1,9 +1,10 @@
 package com.checkmarx.test.flow.config;
 
-import com.checkmarx.flow.controller.GitHubController;
 import com.checkmarx.flow.service.FlowService;
-import com.checkmarx.flow.service.HelperService;
-import com.checkmarx.sdk.service.CxClient;
+
+import com.checkmarx.sdk.service.CxService;
+import com.checkmarx.sdk.service.scanner.ScaScanner;
+
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
@@ -23,9 +24,13 @@ public class CxFlowMocksConfig {
 
     @Primary
     @Bean
-    public CxClient getCxClient() {
-        return mock(CxClient.class);
+    public CxService getCxClient() {
+        return mock(CxService.class);
     }
+
+    @Primary
+    @Bean
+    public ScaScanner getScaClientImpl() { return mock(ScaScanner.class); }
 
     @Primary
     @Bean

@@ -2,6 +2,7 @@ package com.checkmarx.flow.service;
 
 import com.checkmarx.flow.config.BitBucketProperties;
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.dto.RepoComment;
 import com.checkmarx.flow.dto.ScanDetails;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.Sources;
@@ -11,7 +12,7 @@ import com.checkmarx.flow.dto.report.PullRequestReport;
 import com.checkmarx.flow.exception.BitBucketClientException;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.dto.CxConfig;
+import com.checkmarx.sdk.dto.sast.CxConfig;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -28,10 +29,7 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
 
 import java.beans.ConstructorProperties;
-import java.util.Base64;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @Slf4j
 @Service
@@ -423,6 +421,26 @@ public class BitBucketService extends RepoService {
             }
         }
         return result;
+    }
+
+    @Override
+    public void deleteComment(String url, ScanRequest scanRequest) {
+        // not implemented
+    }
+
+    @Override
+    public void updateComment(String commentUrl, String comment, ScanRequest scanRequest) {
+        // not implemented
+    }
+
+    @Override
+    public void addComment(ScanRequest scanRequest, String comment) {
+        // not implemented
+    }
+
+    @Override
+    public List<RepoComment> getComments(ScanRequest scanRequest) {
+        return Collections.emptyList();
     }
 
     private CxConfig loadCxConfigFromBitbucket(ScanRequest request) {

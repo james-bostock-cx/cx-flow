@@ -1,14 +1,17 @@
 package com.checkmarx.flow.service;
 
-import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitLabProperties;
+import com.checkmarx.flow.config.ScmConfigOverrider;
+import com.checkmarx.flow.dto.RepoComment;
+import com.checkmarx.flow.dto.RepoIssue;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.Sources;
+import com.checkmarx.flow.dto.gitlab.Comment;
 import com.checkmarx.flow.dto.gitlab.Note;
 import com.checkmarx.flow.exception.GitLabClientException;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.dto.CxConfig;
+import com.checkmarx.sdk.dto.sast.CxConfig;
 import com.checkmarx.sdk.dto.ScanResults;
 import org.apache.commons.codec.binary.Base64;
 import org.json.JSONArray;
@@ -21,19 +24,22 @@ import org.springframework.http.*;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestTemplate;
+
 import java.beans.ConstructorProperties;
 import java.net.URI;
 import java.net.URISyntaxException;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.util.*;
 
 
 @Service
 public class GitLabService extends RepoService {
 
     private static final String PROJECT = "/projects/{namespace}{x}{repo}";
-    public static final String MERGE_NOTE_PATH = "/projects/{id}/merge_requests/{iid}/notes";
+    public static final String MERGE_NOTE_PATH = "/projects/%s/merge_requests/%s/notes/%s";
+    public static final String MERGE_NOTES_PATH = "/projects/{id}/merge_requests/{iid}/notes";
     public static final String MERGE_PATH = "/projects/{id}/merge_requests/{iid}";
     public static final String COMMIT_PATH = "/projects/{id}/repository/commits/{sha}/comments";
     private static final String FILE_CONTENT = "/projects/{id}/repository/files/{config}?ref={branch}";
@@ -48,27 +54,29 @@ public class GitLabService extends RepoService {
     private static final String ERROR_OCCURRED = "Error occurred";
     private final RestTemplate restTemplate;
     private final GitLabProperties properties;
+    private final ScmConfigOverrider scmConfigOverrider;
 
 
-    @ConstructorProperties({"restTemplate", "properties"})
-    public GitLabService(@Qualifier("flowRestTemplate") RestTemplate restTemplate, GitLabProperties properties) {
+    @ConstructorProperties({"restTemplate", "properties", "scmConfigOverrider"})
+    public GitLabService(@Qualifier("flowRestTemplate") RestTemplate restTemplate, GitLabProperties properties, ScmConfigOverrider scmConfigOverrider) {
         this.restTemplate = restTemplate;
         this.properties = properties;
+        this.scmConfigOverrider = scmConfigOverrider;
 
     }
 
 
-    Integer getProjectDetails(String namespace, String repoName){
+    Integer getProjectDetails(ScanRequest scanRequest, String namespace, String repoName){
 
         try {
-            String url = properties.getApiUrl().concat(PROJECT);
+            String url = scmConfigOverrider.determineConfigApiUrl(properties, scanRequest).concat(PROJECT);
 
             url = url.replace("{namespace}", namespace);
             url = url.replace("{x}", "%2F");
             url = url.replace("{repo}", repoName);
             URI uri = new URI(url);
 
-            HttpEntity httpEntity = new HttpEntity<>(createAuthHeaders());
+            HttpEntity<?> httpEntity = new HttpEntity<>(createAuthHeaders(scanRequest));
             ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.GET, httpEntity, String.class);
             JSONObject obj = new JSONObject(response.getBody());
             return obj.getInt("id");
@@ -92,10 +100,10 @@ public class GitLabService extends RepoService {
      * https://gitlab.msu.edu/help/integration/oauth_provider.md
      * @return HttpHeaders for authentication
      */
-    private HttpHeaders createAuthHeaders(){
+    private HttpHeaders createAuthHeaders(ScanRequest scanRequest){
         HttpHeaders httpHeaders = new HttpHeaders();
         httpHeaders.set(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE);
-        httpHeaders.set("PRIVATE-TOKEN", properties.getToken());
+        httpHeaders.set("PRIVATE-TOKEN", scmConfigOverrider.determineConfigToken(properties, scanRequest.getScmInstance()));
         httpHeaders.set(HttpHeaders.ACCEPT, MediaType.APPLICATION_JSON_VALUE);
         return httpHeaders;
     }
@@ -111,11 +119,20 @@ public class GitLabService extends RepoService {
         }
     }
 
-    public void sendMergeComment(ScanRequest request, String comment){
+    @Override
+    public void updateComment(String commentUrl, String comment, ScanRequest scanRequest) {
+        log.debug("Updating existing comment. url: {}", commentUrl);
+        log.debug("Updated comment: {}" , comment);
+        HttpEntity<?> httpEntity = new HttpEntity<>(RepoIssue.getJSONComment("body", comment).toString(), createAuthHeaders(scanRequest));
+        restTemplate.exchange(commentUrl, HttpMethod.PUT, httpEntity, String.class);
+    }
+
+    @Override
+    public void addComment(ScanRequest request, String comment) {
         Note note = Note.builder()
                 .body(comment)
                 .build();
-        HttpEntity<Note> httpEntity = new HttpEntity<>(note, createAuthHeaders());
+        HttpEntity<Note> httpEntity = new HttpEntity<>(note, createAuthHeaders(request));
         restTemplate.exchange(request.getMergeNoteUri(), HttpMethod.POST, httpEntity, String.class);
     }
 
@@ -133,7 +150,7 @@ public class GitLabService extends RepoService {
     public void sendCommitComment(ScanRequest request, String comment){
         JSONObject note = new JSONObject();
         note.put("note", comment);
-        HttpEntity<String> httpEntity = new HttpEntity<>(note.toString(), createAuthHeaders());
+        HttpEntity<String> httpEntity = new HttpEntity<>(note.toString(), createAuthHeaders(request));
         restTemplate.exchange(request.getMergeNoteUri(), HttpMethod.POST, httpEntity, String.class);
     }
 
@@ -144,16 +161,16 @@ public class GitLabService extends RepoService {
                 log.error("merge_id and merge_title was not provided within the request object, which is required for blocking / unblocking merge requests");
                 return;
             }
-            String endpoint = properties.getApiUrl().concat(MERGE_PATH);
+            String endpoint = scmConfigOverrider.determineConfigApiUrl(properties, request).concat(MERGE_PATH);
             endpoint = endpoint.replace("{id}", request.getRepoProjectId().toString());
             endpoint = endpoint.replace("{iid}", mergeId);
 
             HttpEntity httpEntity = new HttpEntity<>(
                     getJSONMergeTitle("WIP:CX|".concat(request.getAdditionalMetadata(MERGE_TITLE))).toString(),
-                    createAuthHeaders()
+                    createAuthHeaders(request)
             );
             restTemplate.exchange(endpoint,
-                    HttpMethod.PUT, httpEntity, String.class);
+                                  HttpMethod.PUT, httpEntity, String.class);
         }
     }
 
@@ -164,17 +181,17 @@ public class GitLabService extends RepoService {
                 log.error("merge_id and merge_title was not provided within the request object, which is required for blocking / unblocking merge requests");
                 return;
             }
-            String endpoint = properties.getApiUrl().concat(MERGE_PATH);
+            String endpoint = scmConfigOverrider.determineConfigApiUrl(properties, request).concat(MERGE_PATH);
             endpoint = endpoint.replace("{id}", request.getRepoProjectId().toString());
             endpoint = endpoint.replace("{iid}", mergeId);
 
             HttpEntity httpEntity = new HttpEntity<>(
                     getJSONMergeTitle(request.getAdditionalMetadata(MERGE_TITLE)
-                            .replace("WIP:CX|","")).toString(),
-                    createAuthHeaders()
+                                              .replace("WIP:CX|","")).toString(),
+                    createAuthHeaders(request)
             );
             restTemplate.exchange(endpoint,
-                    HttpMethod.PUT, httpEntity, String.class);
+                                  HttpMethod.PUT, httpEntity, String.class);
         }
     }
 
@@ -198,10 +215,10 @@ public class GitLabService extends RepoService {
     private Sources getRepoLanguagePercentages(ScanRequest request) {
         Sources sources = new Sources();
         Map<String, Integer> langs = new HashMap<>();
-        HttpHeaders headers = createAuthHeaders();
+        HttpHeaders headers = createAuthHeaders(request);
         try {
             ResponseEntity<String> response = restTemplate.exchange(
-                    properties.getApiUrl().concat(LANGUAGE_TYPES),
+                    scmConfigOverrider.determineConfigApiUrl(properties, request).concat(LANGUAGE_TYPES),
                     HttpMethod.GET,
                     new HttpEntity(headers),
                     String.class,
@@ -229,10 +246,10 @@ public class GitLabService extends RepoService {
     }
 
     private void scanGitContent(Sources sources, ScanRequest request){
-        HttpHeaders headers = createAuthHeaders();
+        HttpHeaders headers = createAuthHeaders(request);
         try {
             ResponseEntity<String> response = restTemplate.exchange(
-                    properties.getApiUrl().concat(REPO_CONTENT),
+                    scmConfigOverrider.determineConfigApiUrl(properties, request).concat(REPO_CONTENT),
                     HttpMethod.GET,
                     new HttpEntity(headers),
                     String.class,
@@ -258,10 +275,10 @@ public class GitLabService extends RepoService {
 
     @Override
     public CxConfig getCxConfigOverride(ScanRequest request) {
-        HttpHeaders headers = createAuthHeaders();
+        HttpHeaders headers = createAuthHeaders(request);
         try {
             ResponseEntity<String> response = restTemplate.exchange(
-                    properties.getApiUrl().concat(FILE_CONTENT),
+                    scmConfigOverrider.determineConfigApiUrl(properties, request).concat(FILE_CONTENT),
                     HttpMethod.GET,
                     new HttpEntity(headers),
                     String.class,
@@ -289,6 +306,56 @@ public class GitLabService extends RepoService {
             log.error(ERROR_OCCURRED, e);
         }
         return null;
+    }
+
+    @Override
+    public void deleteComment(String url, ScanRequest scanRequest) {
+        HttpEntity<?> httpEntity = new HttpEntity<>(createAuthHeaders(scanRequest));
+        restTemplate.exchange(url, HttpMethod.DELETE, httpEntity, String.class);
+    }
+
+    @Override
+    public List<RepoComment> getComments(ScanRequest scanRequest) {
+        HttpEntity<?> httpEntity = new HttpEntity<>(createAuthHeaders(scanRequest));
+        ResponseEntity<Comment[]> response = restTemplate.exchange(scanRequest.getMergeNoteUri(),
+                                                                   HttpMethod.GET, httpEntity ,
+                                                                   Comment[].class);
+        List<Comment> comments = Arrays.asList(Objects.requireNonNull(response.getBody()));
+        return convertToListCxRepoComments(comments, scanRequest);
+    }
+
+    private List<RepoComment> convertToListCxRepoComments(List<Comment> comments, ScanRequest scanRequest) {
+        List<RepoComment> repoComments = new ArrayList<>();
+        for (Comment comment : comments) {
+            RepoComment repoComment = convertToRepoComment(comment, scanRequest);
+            if (PullRequestCommentsHelper.isCheckMarxComment(repoComment)) {
+                repoComments.add(repoComment);
+            }
+        }
+        return repoComments;
+    }
+
+    private RepoComment convertToRepoComment(Comment comment, ScanRequest scanRequest) {
+
+        return RepoComment.builder()
+                .id(comment.getId())
+                .comment(comment.getBody())
+                .createdAt(parseDate(comment.getCreatedAt()))
+                .updateTime(parseDate(comment.getUpdatedAt()))
+                .commentUrl(getCommentUrl(scanRequest, comment.getId()))
+                .build();
+    }
+
+    private Date parseDate(String dateStr) {
+        LocalDateTime date = ZonedDateTime.parse(dateStr).toLocalDateTime();
+        ZonedDateTime zonedDateTime = date.atZone(ZoneId.systemDefault());
+        return Date.from(zonedDateTime.toInstant());
+    }
+
+    private String getCommentUrl(ScanRequest scanRequest, long commentId) {
+        String path = scmConfigOverrider.determineConfigApiUrl(properties, scanRequest).concat(MERGE_NOTE_PATH);
+        return String.format(path, scanRequest.getRepoProjectId().toString(),
+                             scanRequest.getAdditionalMetadata(MERGE_ID), commentId);
     }
 
 }

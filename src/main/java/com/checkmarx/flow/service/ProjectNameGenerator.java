@@ -2,22 +2,24 @@ package com.checkmarx.flow.service;
 
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.exception.MachinaRuntimeException;
-import com.checkmarx.sdk.config.CxProperties;
-import lombok.RequiredArgsConstructor;
+import com.checkmarx.sdk.config.CxPropertiesBase;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.stereotype.Service;
 
-import java.io.IOException;
-import java.util.HashMap;
 
+@Getter
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class ProjectNameGenerator {
     private final HelperService helperService;
-    private final CxProperties cxProperties;
-    private final ExternalScriptService scriptService;
+    private final CxPropertiesBase cxProperties;
+
+    public ProjectNameGenerator(HelperService helperService, CxScannerService cxScannerService) {
+        this.helperService = helperService;
+        this.cxProperties = cxScannerService.getProperties();
+    }
 
     /**
      * Determines effective project name that can be used by vulnerability scanners.
@@ -76,26 +78,10 @@ public class ProjectNameGenerator {
     }
 
     private String tryGetProjectNameFromScript(ScanRequest request) {
-        String scriptFile = cxProperties.getProjectScript();
-        String project = request.getProject();
-        //note:  if script is provided, it is highest priority
-        if (StringUtils.isNotEmpty(scriptFile)) {
-            log.info("executing external script to determine the Project in Checkmarx to be used ({})", scriptFile);
-            try {
-                String script = helperService.getStringFromFile(scriptFile);
-                HashMap<String, Object> bindings = new HashMap<>();
-                bindings.put("request", request);
-                Object result = scriptService.runScript(script, bindings);
-                if (result instanceof String) {
-                    return ((String) result);
-                }
-            } catch (IOException e) {
-                log.error("Error reading script file for checkmarx project {}", scriptFile, e);
-            }
-        } else if (StringUtils.isNotEmpty(project)) {
-            log.info("External script is not specified. Using project name from scan request: {}", project);
-            return project;
-        }
-        return null;  //null will indicate no override of team will take place
+        return helperService.getCxProject(request);
+    }
+
+    public String getCxComment(ScanRequest request, String cxflowScanMsg) {
+        return helperService.getCxComment(request, cxflowScanMsg);
     }
 }

@@ -2,23 +2,26 @@ package com.checkmarx.flow.controller;
 
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.JiraProperties;
-import com.checkmarx.flow.dto.*;
+import com.checkmarx.flow.constants.FlowConstants;
+import com.checkmarx.flow.dto.BugTracker;
+import com.checkmarx.flow.dto.ControllerRequest;
+import com.checkmarx.flow.dto.EventResponse;
+import com.checkmarx.flow.dto.FlowOverride;
+import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.exception.InvalidTokenException;
+import com.checkmarx.flow.sastscanning.ScanRequestConverter;
 import com.checkmarx.flow.service.*;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
 import com.checkmarx.sdk.config.Constants;
-import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
-import com.checkmarx.sdk.dto.filtering.ScriptedFilter;
+import com.checkmarx.sdk.service.scanner.CxClient;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonProperty;
-import groovy.lang.GroovyShell;
-import groovy.lang.Script;
 import lombok.RequiredArgsConstructor;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.slf4j.Logger;
@@ -27,9 +30,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
-import java.util.Arrays;
-import java.util.List;
-import java.util.Locale;
+import java.net.URLDecoder;
+import java.util.*;
 
 
 /**
@@ -47,14 +49,18 @@ public class FlowController {
     private static final String TOKEN_HEADER = "x-cx-token";
 
     private final FlowProperties properties;
-    private final CxProperties cxProperties;
+    private final CxScannerService cxScannerService;
     private final FlowService scanService;
     private final HelperService helperService;
     private final JiraProperties jiraProperties;
-    private final ResultsService resultsService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final SastScanner sastScanner;
+    private final ResultsService resultsService;
+    private final CxClient cxService;
 
+    private final CxGoScanner cxgoScanner;
+    
     @GetMapping(value = "/scanresults", produces = "application/json")
     public ScanResults latestScanResults(
             // Mandatory parameters
@@ -72,7 +78,7 @@ public class FlowController {
             @RequestParam(value = "bug", required = false) String bug) {
 
         String uid = helperService.getShortUid();
-        MDC.put("cx", uid);
+        MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
         // Validate shared API token from header
         validateToken(token);
 
@@ -103,10 +109,130 @@ public class FlowController {
         // Fetch the Checkmarx Scan Results based on given ScanRequest.
         // The cxProject parameter is null because the required project metadata
         // is already contained in the scanRequest parameter.
-        ScanResults scanResults = resultsService.cxGetResults(scanRequest, null).join();
+
+        ScanResults scanResults = CxScannerService.getScanner(cxgoScanner, sastScanner).getLatestScanResults(scanRequest);
+        
         log.debug("ScanResults {}", scanResults);
 
         return scanResults;
+    }
+
+    /**
+     * The isAlive endpoint ensures that Fargate can check the status of containers
+     * running CxFlow instances.
+     *
+     * @return A string containing a generic message.
+     */
+    @GetMapping(value = "/isAlive")
+    public ResponseEntity<EventResponse> scanPostback() {
+        return ResponseEntity.status(HttpStatus.OK).body(EventResponse.builder()
+                .message("CxFlow is alive!")
+                .success(true)
+                .build());
+    }
+
+    @PostMapping(value = "/postbackAction/{scanID}")
+    public ResponseEntity<EventResponse> scanPostback(
+            @RequestBody String postBackData,
+            @PathVariable(value = "scanID") String scanID
+    ) {
+        log.debug("Handling post-back from SAST");
+        int maxNumberOfTokens = 100;
+        PostRequestData prd = new PostRequestData();
+        String token = " ";
+        String bugTracker = properties.getBugTracker();
+        //
+        /// Decode the scan details.
+        //
+        StringTokenizer postData = new StringTokenizer(postBackData, "&");
+        int iteration  = 0;
+        while(postData.hasMoreTokens() && iteration < maxNumberOfTokens) {
+            String strToken = postData.nextToken();
+            if(strToken.length() > 6 && strToken.startsWith("token=")) {
+                token = strToken.substring(6);
+            }
+            if(strToken.length() > 13 && strToken.startsWith("scancomments=")) {
+                String scanDetails = strToken.substring(13);
+                try {
+                    String postRequest = URLDecoder.decode(scanDetails,"UTF-8");
+                    decodePostBackReq(postRequest, prd);
+                } catch(Exception e) {
+                    log.error("Error decoding scan details");
+                }
+            }
+            iteration++;
+        }
+        validateToken(token);
+        try {
+            String product = "CX";
+            ScanRequest.Product p = ScanRequest.Product.valueOf(product.toUpperCase(Locale.ROOT));
+            ScanRequest scanRequest = ScanRequest.builder()
+                    .namespace(prd.namespace)
+                    .repoName(prd.repoName)
+                    .project(prd.project)
+                    .team(prd.team)
+                    .repoType(ScanRequest.Repository.GITHUB)
+                    .product(p)
+                    .branch(prd.branch)
+                    .build();
+            // There won't be a scan ID on the post-back, so we need to fake it in the
+            // event shard support is turned on (very likely if using post-back support).
+            String uid = helperService.getShortUid();
+            MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
+            ScanRequestConverter src = sastScanner.getScanRequestConverter();
+            src.setShardPropertiesIfExists(scanRequest, prd.team);
+            // Now go ahead and process the scan as normal.
+            ScanResults scanResults = cxService.getReportContentByScanId(Integer.parseInt(scanID), scanRequest.getFilter());
+            scanRequest.putAdditionalMetadata("statuses_url", prd.pullRequestURL);
+            scanRequest.setMergeNoteUri(prd.mergeNoteUri);
+            BugTracker bt = ScanUtils.getBugTracker(null, prd.bugType, jiraProperties, bugTracker);
+            scanRequest.setBugTracker(bt);
+            scanResults.setSastScanId(Integer.parseInt(scanID));
+            resultsService.publishCombinedResults(scanRequest, scanResults);
+        } catch (Exception e) {
+            log.error("Error posting SAST scan results", e);
+        }
+        return ResponseEntity.status(HttpStatus.OK).body(EventResponse.builder()
+                .message("Scan Results Successfully Processed")
+                .success(true)
+                .build());
+    }
+
+    private void decodePostBackReq(String postRequest, PostRequestData prd) {
+        StringTokenizer scanDetailData = new StringTokenizer(postRequest, ";");
+        int detailCnt = 0;
+        while(scanDetailData.hasMoreTokens()) {
+            String scanDetailToken = scanDetailData.nextToken();
+            if(scanDetailToken == null) scanDetailToken = "";
+            switch(detailCnt) {
+                case 1:
+                    prd.namespace = scanDetailToken;
+                    break;
+                case 2:
+                    prd.repoName = scanDetailToken;
+                    break;
+                case 3:
+                    prd.branch = scanDetailToken;
+                    break;
+                case 4:
+                    prd.mergeNoteUri = scanDetailToken;
+                    break;
+                case 5:
+                    prd.pullRequestURL = scanDetailToken;
+                    break;
+                case 6:
+                    if(scanDetailToken.equals("PULL")) {
+                        prd.bugType = BugTracker.Type.GITHUBPULL;
+                    } else {
+                        prd.bugType = BugTracker.Type.CUSTOM;
+                    }
+                    break;
+                default:
+                    // Nothing to do.
+                    break;
+            }
+            detailCnt++;
+        }
     }
 
     @PostMapping("/scan")
@@ -116,7 +242,7 @@ public class FlowController {
     ){
         String uid = helperService.getShortUid();
         String errorMessage = "Error submitting Scan Request.";
-        MDC.put("cx", uid);
+        MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
         log.info("Processing Scan initiation request");
 
         validateToken(token);
@@ -133,7 +259,7 @@ public class FlowController {
                 application = project;
             }
             if(ScanUtils.empty(team)){
-                team = cxProperties.getTeam();
+                team = cxScannerService.getProperties().getTeam();
             }
             properties.setTrackApplicationOnly(scanRequest.isApplicationOnly());
 
@@ -145,11 +271,11 @@ public class FlowController {
                         .success(false)
                         .build());
             }
-            String scanPreset = cxProperties.getScanPreset();
+            String scanPreset = cxScannerService.getProperties().getScanPreset();
             if(!ScanUtils.empty(scanRequest.getPreset())){
                 scanPreset = scanRequest.getPreset();
             }
-            boolean inc = cxProperties.getIncremental();
+            boolean inc = cxScannerService.getProperties().getIncremental();
             if(scanRequest.isIncremental()){
                 inc = true;
             }
@@ -177,11 +303,11 @@ public class FlowController {
 
             List<String> excludeFiles = scanRequest.getExcludeFiles();
             List<String> excludeFolders = scanRequest.getExcludeFolders();
-            if((excludeFiles == null) && !ScanUtils.empty(cxProperties.getExcludeFiles())){
-                excludeFiles = Arrays.asList(cxProperties.getExcludeFiles().split(","));
+            if((excludeFiles == null) && !ScanUtils.empty(cxScannerService.getProperties().getExcludeFiles())){
+                excludeFiles = Arrays.asList(cxScannerService.getProperties().getExcludeFiles().split(","));
             }
-            if(excludeFolders == null && !ScanUtils.empty(cxProperties.getExcludeFolders())){
-                excludeFolders = Arrays.asList(cxProperties.getExcludeFolders().split(","));
+            if(excludeFolders == null && !ScanUtils.empty(cxScannerService.getProperties().getExcludeFolders())){
+                excludeFolders = Arrays.asList(cxScannerService.getProperties().getExcludeFolders().split(","));
             }
 
             ScanRequest request = ScanRequest.builder()
@@ -228,23 +354,17 @@ public class FlowController {
                 .build());
     }
 
+
+
     private FilterConfiguration determineFilter(CxScanRequest scanRequest) {
-        FilterConfiguration filter = filterFactory.getFilter(null, properties);
+        FilterConfiguration filter;
 
         boolean hasSimpleFilters = CollectionUtils.isNotEmpty(scanRequest.getFilters());
         boolean hasFilterScript = StringUtils.isNotEmpty(scanRequest.getFilterScript());
         if (hasSimpleFilters || hasFilterScript) {
-            Script parsedScript = null;
-            if (hasFilterScript) {
-                GroovyShell groovyShell = new GroovyShell();
-                parsedScript = groovyShell.parse(scanRequest.getFilterScript());
-            }
-            filter = FilterConfiguration.builder()
-                    .simpleFilters(scanRequest.getFilters())
-                    .scriptedFilter(ScriptedFilter.builder()
-                            .script(parsedScript)
-                            .build())
-                    .build();
+            filter = filterFactory.getFilterFromComponents(scanRequest.getFilterScript(), scanRequest.getFilters());
+        } else {
+            filter = filterFactory.getFilter(null, properties);
         }
         return filter;
     }
@@ -501,6 +621,15 @@ public class FlowController {
                     '}';
         }
     }
+}
 
-
+class PostRequestData {
+    String mergeNoteUri = "";
+    String pullRequestURL = "";
+    String branch = "";
+    String repoName = "";
+    String namespace = "";
+    String team = "";
+    String project = "";
+    BugTracker.Type bugType;
 }

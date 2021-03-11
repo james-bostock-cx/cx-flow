@@ -11,6 +11,7 @@ import com.checkmarx.sdk.dto.cx.CxScanSummary;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
 import com.checkmarx.sdk.exception.CheckmarxException;
 import com.checkmarx.sdk.exception.CheckmarxRuntimeException;
+import com.checkmarx.sdk.service.scanner.CxClient;
 import com.checkmarx.sdk.service.*;
 import com.checkmarx.utils.TestsParseUtils;
 import io.cucumber.java.en.And;
@@ -52,6 +53,7 @@ public class FilterScriptSteps {
     private Map<String, Integer> findingFilenameToNumber;
     private final CxProperties cxProperties;
     private final CxLegacyService cxLegacyService;
+    private final FilterInputFactory filterInputFactory;
     private final FilterValidator filterValidator;
 
     private Set<Integer> findingNumbersAfterFiltering;
@@ -99,7 +101,7 @@ public class FilterScriptSteps {
     @When("CxFlow generates issues from findings")
     public void cxFlowGeneratesIssues() throws CheckmarxException, IOException {
         RestTemplate restTemplateMock = getRestTemplateMock();
-        CxAuthClient authClientMock = getAuthClientMock();
+        CxAuthService authClientMock = getAuthClientMock();
         CxClient cxClientSpy = getCxClientSpy(restTemplateMock, authClientMock);
         generateIssues(cxClientSpy);
     }
@@ -185,12 +187,13 @@ public class FilterScriptSteps {
         return result;
     }
 
-    private CxClient getCxClientSpy(RestTemplate restTemplateMock, CxAuthClient authClientMock) throws CheckmarxException {
+    private CxClient getCxClientSpy(RestTemplate restTemplateMock, CxAuthService authClientMock) throws CheckmarxException {
         CxClient cxClient = new CxService(authClientMock,
                 cxProperties,
                 cxLegacyService,
                 restTemplateMock,
                 null,
+                filterInputFactory,
                 filterValidator);
 
         CxClient cxClientSpy = spy(cxClient);
@@ -198,8 +201,8 @@ public class FilterScriptSteps {
         return cxClientSpy;
     }
 
-    private CxAuthClient getAuthClientMock() {
-        CxAuthClient authClientMock = mock(CxAuthClient.class);
+    private CxAuthService getAuthClientMock() {
+        CxAuthService authClientMock = mock(CxAuthService.class);
         doReturn(new HttpHeaders()).when(authClientMock).createAuthHeaders();
         doReturn(null).when(authClientMock).getLegacySession();
         return authClientMock;

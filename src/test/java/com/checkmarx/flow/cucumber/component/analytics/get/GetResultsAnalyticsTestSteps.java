@@ -8,21 +8,24 @@ import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.report.ScanResultsReport;
 import com.checkmarx.flow.exception.MachinaException;
+import com.checkmarx.flow.service.CxScannerService;
 import com.checkmarx.flow.service.EmailService;
 import com.checkmarx.flow.service.ResultsService;
 import com.checkmarx.jira.PublishUtils;
 import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.cx.CxScanSummary;
-import com.checkmarx.sdk.dto.ast.SCAResults;
-import com.checkmarx.sdk.dto.ast.Summary;
+import com.checkmarx.sdk.dto.sca.SCAResults;
+
+import com.checkmarx.sdk.dto.sca.Summary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
+import com.checkmarx.sdk.service.CxService;
 import com.checkmarx.test.flow.config.CxFlowMocksConfig;
-import com.cx.restclient.dto.scansummary.Severity;
-import com.cx.restclient.ast.dto.sca.report.Finding;
+import com.checkmarx.sdk.dto.scansummary.Severity;
+import com.checkmarx.sdk.dto.sca.report.Finding;
 
 import io.cucumber.java.Before;
 import io.cucumber.java.en.Then;
@@ -50,21 +53,18 @@ public class GetResultsAnalyticsTestSteps {
     private final static int SCAN_ID = 100001;
     private static final String PULL_REQUEST_STATUSES_URL = "statuses url stub";
     private static final String MERGE_NOTE_URL = "merge note url stub";
-    private final CxClient cxClientMock;
-    private final FlowProperties flowProperties;
+    private final CxService cxClientMock;
     private final EmailService emailService;
     private final CxProperties cxProperties;
     private ScanResults scanResultsToInject;
     private ResultsService resultsService;
 
 
-    public GetResultsAnalyticsTestSteps(CxClient cxClientMock, FlowProperties flowProperties,
-                                        CxProperties cxProperties, EmailService emailService) {
+    public GetResultsAnalyticsTestSteps(CxService cxClientMock, FlowProperties flowProperties, EmailService emailService, CxProperties cxProperties) {
         this.cxClientMock = cxClientMock;
         flowProperties.setThresholds(new HashMap<>());
-        this.flowProperties = flowProperties;
-        this.cxProperties = cxProperties;
         this.emailService = emailService;
+        this.cxProperties = cxProperties;
     }
 
     @Before()
@@ -75,17 +75,19 @@ public class GetResultsAnalyticsTestSteps {
     }
 
     private ResultsService createResultsService() {
+        
+        CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, cxClientMock, null );
+        
         return new ResultsService(
-                cxClientMock,
+                cxScannerService,
                 null,
                 null,
                 null,
                 null,
                 null,
                 null,
-                null, emailService,
-                cxProperties,
-                flowProperties);
+                null,
+                emailService);
     }
 
 
@@ -108,7 +110,7 @@ public class GetResultsAnalyticsTestSteps {
 
         scaResults.setScanId("" + SCAN_ID);
 
-        List<Finding> findings = new LinkedList<Finding>();
+        List<Finding> findings = new LinkedList<>();
         addFinding(high, findingCounts, findings, Severity.HIGH, Filter.Severity.HIGH);
         addFinding(medium, findingCounts, findings, Severity.MEDIUM, Filter.Severity.MEDIUM);
         addFinding(low, findingCounts, findings, Severity.LOW, Filter.Severity.LOW);

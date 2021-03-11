@@ -1,13 +1,20 @@
 package com.checkmarx.flow.service;
 
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.dto.ScanRequest;
+import com.checkmarx.flow.exception.MachinaRuntimeException;
+
 import com.checkmarx.sdk.config.ScaProperties;
 import com.checkmarx.sdk.dto.ScanResults;
-import com.checkmarx.sdk.dto.ast.ASTResultsWrapper;
-import com.checkmarx.sdk.service.AstClient;
-import com.cx.restclient.ScaClientImpl;
-import lombok.RequiredArgsConstructor;
+import com.checkmarx.sdk.dto.AstScaResults;
+import com.checkmarx.sdk.dto.ast.ScanParams;
+
+import com.checkmarx.sdk.exception.CheckmarxException;
+
+import com.checkmarx.sdk.service.scanner.ScaScanner;
+import com.checkmarx.sdk.utils.CxRepoFileHelper;
 import lombok.extern.slf4j.Slf4j;
+
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -15,27 +22,42 @@ import java.util.Optional;
 
 @Service
 @Slf4j
-public class SCAScanner extends  AbstractASTScanner{
+public class SCAScanner extends AbstractASTScanner {
 
-    public SCAScanner(ScaClientImpl astClient, FlowProperties flowProperties) {
-        super(astClient, flowProperties, ScaProperties.CONFIG_PREFIX);
+    private final ScaProperties scaProperties;
+    private final CxRepoFileHelper cxRepoFileHelper;
+
+    public SCAScanner(ScaScanner scaClient, FlowProperties flowProperties, BugTrackerEventTrigger bugTrackerEventTrigger,
+                      ScaProperties scaProperties) {
+        super(scaClient, flowProperties, ScaProperties.CONFIG_PREFIX, bugTrackerEventTrigger);
+        this.scaProperties = scaProperties;
+        this.cxRepoFileHelper = new CxRepoFileHelper();
     }
 
-
     @Override
-    protected ScanResults toScanResults(ASTResultsWrapper internalResults) {
+    protected ScanResults toScanResults(AstScaResults internalResults) {
         return ScanResults.builder()
                 .scaResults(internalResults.getScaResults())
                 .build();
     }
 
-
     @Override
-    protected String getScanId(ASTResultsWrapper internalResults) {
-
+    protected String getScanId(AstScaResults internalResults) {
         return Optional.ofNullable(internalResults.getScaResults().getScanId()).orElse("");
     }
 
-
+    @Override
+    protected void setScannerSpecificProperties(ScanRequest scanRequest, ScanParams scanParams) {
+        try {
+            if (scaProperties.isEnabledZipScan()) {
+                log.info("CxAST-SCA zip scan is enabled");
+                String scaClonedFolderPath = cxRepoFileHelper.getScaClonedRepoFolderPath(scanRequest.getRepoUrlWithAuth(), scanRequest.getExcludeFiles(), scanRequest.getBranch());
+                scanParams.setSourceDir(scaClonedFolderPath);
+                scanParams.getScaConfig().setExcludeFiles(scanRequest.getExcludeFiles());
+            }
+        } catch (CheckmarxException e) {
+            throw new MachinaRuntimeException(e.getMessage());
+        }
+    }
 
 }

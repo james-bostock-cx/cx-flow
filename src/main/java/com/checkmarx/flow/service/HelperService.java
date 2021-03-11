@@ -1,44 +1,46 @@
 package com.checkmarx.flow.service;
 
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.config.JiraProperties;
 import com.checkmarx.flow.dto.CxProfile;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.Sources;
 import com.checkmarx.flow.utils.ScanUtils;
 import com.checkmarx.sdk.config.Constants;
-import com.checkmarx.sdk.config.CxProperties;
+import com.checkmarx.sdk.config.CxPropertiesBase;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.commons.collections.CollectionUtils;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.RandomStringUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.slf4j.Logger;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.PostConstruct;
 import java.io.File;
 import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Service
+@Slf4j
 public class HelperService {
 
-    private static final Logger log = org.slf4j.LoggerFactory.getLogger(HelperService.class);
-    private static final String REQUEST = "request";
     private final FlowProperties properties;
-    private final CxProperties cxProperties;
+    private final CxPropertiesBase cxProperties;
+    private final JiraProperties jiraProperties;
     private final ExternalScriptService scriptService;
     private List<CxProfile> profiles;
 
-    public HelperService(FlowProperties properties, CxProperties cxProperties, ExternalScriptService scriptService) {
+    public HelperService(FlowProperties properties, CxScannerService cxScannerService,
+                         JiraProperties jiraProperties,
+                         ExternalScriptService scriptService) {
         this.properties = properties;
-        this.cxProperties = cxProperties;
+        this.cxProperties = cxScannerService.getProperties();
+        this.jiraProperties = jiraProperties;
         this.scriptService = scriptService;
     }
 
@@ -53,7 +55,7 @@ public class HelperService {
                 CxProfile[] cxProfiles = mapper.readValue(profileConfig, CxProfile[].class);
                 this.profiles = Arrays.asList(cxProfiles);
             }catch (IOException e){
-                log.warn("No CxProfile found - {}", properties.getProfileConfig(), e);
+                log.warn("No CxProfile found - {}", e.getMessage());
             }
         }
     }
@@ -64,7 +66,7 @@ public class HelperService {
         // If script is provided, it is highest priority
         String scriptFile = properties.getBranchScript();
         if (!ScanUtils.empty(scriptFile)) {
-            Object branchShouldBeScanned = executeBranchScript(scriptFile, request, branches);
+            Object branchShouldBeScanned = scriptService.executeBranchScript(scriptFile, request, branches);
             if (branchShouldBeScanned instanceof Boolean) {
                 return ((boolean) branchShouldBeScanned);
             }
@@ -95,21 +97,6 @@ public class HelperService {
         return result;
     }
 
-    private Object executeBranchScript(String scriptFile, ScanRequest request, List<String> branches) {
-        Object result = null;
-        log.info("executing external script to determine if branch should be scanned ({})", scriptFile);
-        try {
-            String script = getStringFromFile(scriptFile);
-            HashMap<String, Object> bindings = new HashMap<>();
-            bindings.put(REQUEST, request);
-            bindings.put("branches", branches);
-            result = scriptService.runScript(script, bindings);
-        } catch (IOException e) {
-            log.error("Error reading script file {}", scriptFile, e);
-        }
-        return result;
-    }
-
     private static String getBranchToCheck(ScanRequest request) {
         String result = request.getBranch();
         String targetBranch = request.getMergeTargetBranch();
@@ -131,32 +118,26 @@ public class HelperService {
         return getEffectiveEntityName(request, scriptFile, project, "project");
     }
 
+    public String getJiraProjectKey(ScanRequest request) {
+        String scriptFile = jiraProperties.getProjectKeyScript();
+        String jiraProject = request.getBugTracker().getProjectKey();
+        return getEffectiveEntityName(request, scriptFile, jiraProject, "jira project");
+    }
+
+    public String getCxComment(ScanRequest request, String defaultValue){
+        String scriptFile = properties.getCommentScript();
+        return getEffectiveEntityName(request, scriptFile, defaultValue,"comment");
+    }
+
     private String getEffectiveEntityName(ScanRequest request, String scriptFile, String defaultName, String entity) {
         String result = null;
         //note:  if script is provided, it is highest priority
         if (!ScanUtils.empty(scriptFile)) {
-            result = getScriptExecutionResult(request, scriptFile, entity);
+            result = Optional.ofNullable(scriptService.getScriptExecutionResult(request, scriptFile, entity)).orElse(defaultName) ;
         } else if (!ScanUtils.empty(defaultName)) {
             result = defaultName;
         }
         return result;  //null will indicate no override will take place
-    }
-
-    private String getScriptExecutionResult(ScanRequest request, String scriptFile, String entity) {
-        String result = null;
-        log.info("executing external script to determine the {} in Checkmarx to be used ({})", entity, scriptFile);
-        try {
-            String script = getStringFromFile(scriptFile);
-            HashMap<String, Object> bindings = new HashMap<>();
-            bindings.put(REQUEST, request);
-            Object rawResult = scriptService.runScript(script, bindings);
-            if (rawResult instanceof String) {
-                result = ((String) rawResult);
-            }
-        } catch (IOException e) {
-            log.error("Error reading script file for Checkmarx {} {}", entity, scriptFile, e);
-        }
-        return result;
     }
 
     public String getShortUid(ScanRequest request){
@@ -167,10 +148,6 @@ public class HelperService {
 
     public String getShortUid(){
         return RandomStringUtils.random(Constants.SHORT_ID_LENGTH, true, true) ;
-    }
-
-    public String getStringFromFile(String path) throws IOException {
-        return new String(Files.readAllBytes(Paths.get(path.intern())));
     }
 
     /**
@@ -283,5 +260,6 @@ public class HelperService {
     public void setProfiles(List<CxProfile> profiles) {
         this.profiles = profiles;
     }
+
 }
 

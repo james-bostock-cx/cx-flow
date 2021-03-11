@@ -14,20 +14,21 @@ import com.checkmarx.flow.service.*;
 
 import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.ast.*;
+import com.checkmarx.sdk.dto.ast.report.AstSummaryResults;
+import com.checkmarx.sdk.dto.ast.report.StatusCounter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.checkmarx.sdk.dto.ScanResults;
-import com.checkmarx.sdk.dto.ast.ASTResults;
-import com.checkmarx.sdk.dto.ast.SCAResults;
-import com.checkmarx.sdk.dto.ast.Summary;
+import com.checkmarx.sdk.dto.sca.SCAResults;
+import com.checkmarx.sdk.dto.sca.Summary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
+import com.checkmarx.sdk.service.CxService;
 import com.checkmarx.test.flow.config.CxFlowMocksConfig;
-import com.cx.restclient.ast.dto.sast.AstSastResults;
 
-import com.cx.restclient.ast.dto.sast.report.AstSastSummaryResults;
-import com.cx.restclient.ast.dto.sast.report.FindingNode;
-import com.cx.restclient.ast.dto.sast.report.StatusCounter;
-import com.cx.restclient.dto.scansummary.Severity;
+import com.checkmarx.sdk.dto.ast.report.FindingNode;
+
+import com.checkmarx.sdk.dto.scansummary.Severity;
 import io.cucumber.java.Before;
 import io.cucumber.java.en.And;
 import io.cucumber.java.en.Then;
@@ -39,8 +40,7 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.springframework.boot.test.context.SpringBootTest;
-import com.cx.restclient.ast.dto.sast.report.Finding;
-
+import com.checkmarx.sdk.dto.ast.report.Finding;
 
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
@@ -49,6 +49,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 
+import static com.checkmarx.flow.utils.HTMLHelper.NO_POLICY_VIOLATION_MESSAGE;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.Mockito.doAnswer;
@@ -67,32 +68,34 @@ public class GitHubCommentsASTSteps {
     private static final String AST_SCA = "AST,SCA";
     private static final String GIT_URL =  "https://github.com/cxflowtestuser/testsAST.git";
     private static final String REGEX = "### Checkmarx";
+    private static final String AST_WEB_REPORT_LINK = "https://astWebReportUrl";
 
-    private final CxClient cxClientMock;
-    private final FlowProperties flowProperties;
-    private final EmailService emailService;
+    private final CxService cxClientMock;
     private final CxProperties cxProperties;
+    private final EmailService emailService;
     private final IssueService issueService;
     private final GitHubService gitHubService;
     private final GitHubProperties gitHubProperties;
+    private final FlowProperties flowProperties;
     private ScanResults scanResultsToInject;
     private ResultsService resultsService;
     private String scannerType;
     private ScanRequest.Repository repo;
     private String comment;
 
-    public GitHubCommentsASTSteps(CxClient cxClientMock, FlowProperties flowProperties,
-                                  CxProperties cxProperties, EmailService emailService,
+    public GitHubCommentsASTSteps(CxService cxClientMock, FlowProperties flowProperties,
+                                  EmailService emailService,
                                   GitHubService gitHubService, IssueService issueService,
-                                  GitHubProperties gitHubProperties) {
+                                  GitHubProperties gitHubProperties,
+                                  CxProperties cxProperties) {
         this.cxClientMock = cxClientMock;
         flowProperties.setThresholds(new HashMap<>());
-        this.flowProperties = flowProperties;
-        this.cxProperties = cxProperties;
         this.emailService = emailService;
         this.gitHubService = Mockito.spy(gitHubService);
         this.issueService = issueService;
         this.gitHubProperties = gitHubProperties;
+        this.cxProperties = cxProperties;
+        this.flowProperties = flowProperties;
     }
 
     @Before()
@@ -125,18 +128,19 @@ public class GitHubCommentsASTSteps {
             this.repo = ScanRequest.Repository.GITHUB;
             
             initGitHubProperties();
-            
+
+            CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, cxClientMock, null );
+
             return new ResultsService(
-                    cxClientMock,
+                    cxScannerService,
                     null,
                     null,
                     issueService,
                     gitHubService,
                     null,
                     null,
-                    null, emailService,
-                    cxProperties,
-                    flowProperties);
+                    null,
+                    emailService);
         }
         
         throw new UnsupportedOperationException();
@@ -146,32 +150,31 @@ public class GitHubCommentsASTSteps {
     private ScanResults createFakeASTScanResults(int highCount, int mediumCount, int lowCount) {
         ScanResults result = new ScanResults();
         ASTResults astResults = new ASTResults();
-        AstSastResults astSastResults = new AstSastResults();
 
-        List<Finding> findings = new LinkedList<Finding>();
+        List<Finding> findings = new LinkedList<>();
 
-        astSastResults.setScanId("" + SCAN_ID);
+        astResults.setScanId("" + SCAN_ID);
 
         boolean addNodes = false;
         if(highCount + mediumCount + lowCount > 0){
             addNodes = true;
         }
-        List<StatusCounter> findingCounts= new  LinkedList<StatusCounter> ();
+        List<StatusCounter> findingCounts = new LinkedList<> ();
         addFinding(highCount, findingCounts, findings, Severity.HIGH.name(),addNodes, "SQL_INJECTION");
         addFinding(mediumCount, findingCounts, findings, Severity.MEDIUM.name(), addNodes, "Hardcoded_password_in_Connection_String");
         addFinding(lowCount, findingCounts, findings, Severity.LOW.name(),addNodes, "Open_Redirect");
         
-        astSastResults.setFindings(findings);
-        astResults.setResults(astSastResults);
+        astResults.setFindings(findings);
         result.setAstResults(astResults);
         
-        AstSastSummaryResults summary = new AstSastSummaryResults();
+        AstSummaryResults summary = new AstSummaryResults();
         summary.setStatusCounters(findingCounts);
         summary.setHighVulnerabilityCount(highCount);
         summary.setMediumVulnerabilityCount(mediumCount);
         summary.setLowVulnerabilityCount(lowCount);
 
-        astSastResults.setSummary(summary);
+        astResults.setWebReportLink(AST_WEB_REPORT_LINK);
+        astResults.setSummary(summary);
         Map<String, Object> details = new HashMap<>();
         details.put(Constants.SUMMARY_KEY, new HashMap<>());
         result.setAdditionalDetails(details);
@@ -180,13 +183,13 @@ public class GitHubCommentsASTSteps {
 
     private static ScanResults createFakeSCAScanResults(int high, int medium, int low) {
 
-        Map<Filter.Severity, Integer> findingCounts= new HashMap<Filter.Severity, Integer>() ;
+        Map<Filter.Severity, Integer> findingCounts= new HashMap<>() ;
 
         SCAResults scaResults = new SCAResults();
 
         scaResults.setScanId("" + SCAN_ID);
 
-        List<com.cx.restclient.ast.dto.sca.report.Finding> findings = new LinkedList<>();
+        List<com.checkmarx.sdk.dto.sca.report.Finding> findings = new LinkedList<>();
         addFinding(high, findingCounts, findings, Severity.HIGH, Filter.Severity.HIGH);
         addFinding(medium, findingCounts, findings, Severity.MEDIUM, Filter.Severity.MEDIUM);
         addFinding(low, findingCounts, findings, Severity.LOW, Filter.Severity.LOW);
@@ -205,9 +208,9 @@ public class GitHubCommentsASTSteps {
                 .build();
     }
 
-    private static void addFinding(Integer countFindingsPerSeverity, Map<Filter.Severity, Integer> findingCounts, List<com.cx.restclient.ast.dto.sca.report.Finding> findings, Severity severity, Filter.Severity filterSeverity) {
+    private static void addFinding(Integer countFindingsPerSeverity, Map<Filter.Severity, Integer> findingCounts, List<com.checkmarx.sdk.dto.sca.report.Finding> findings, Severity severity, Filter.Severity filterSeverity) {
         for ( int i=0; i <countFindingsPerSeverity; i++) {
-            com.cx.restclient.ast.dto.sca.report.Finding fnd = new com.cx.restclient.ast.dto.sca.report.Finding();
+            com.checkmarx.sdk.dto.sca.report.Finding fnd = new com.checkmarx.sdk.dto.sca.report.Finding();
             fnd.setSeverity(severity);
             fnd.setPackageId("");
             findings.add(fnd);
@@ -216,7 +219,7 @@ public class GitHubCommentsASTSteps {
         findingCounts.put(filterSeverity, countFindingsPerSeverity);
     }
     
-    private  void addFinding(Integer countFindingsPerSeverity, List<StatusCounter> findingCounts, List<Finding> findings, String severity,boolean addNodes, String  queryName) {
+    private  void addFinding(Integer countFindingsPerSeverity, List<StatusCounter> findingCounts, List<Finding> findings, String severity, boolean addNodes, String  queryName) {
         for ( int i=0; i <countFindingsPerSeverity; i++) {
             Finding fnd = new Finding();
             fnd.setSeverity(severity);
@@ -257,11 +260,11 @@ public class GitHubCommentsASTSteps {
 
     private void initGitHubProperties() {
         this.gitHubProperties.setCxSummary(false);
-        this.gitHubProperties.setFlowSummary(false);
         this.gitHubProperties.setUrl(GIT_URL);
         this.gitHubProperties.setWebhookToken("1234");
         this.gitHubProperties.setApiUrl("https://api.github.com/repos");
         this.gitHubProperties.setBlockMerge(false);
+        this.gitHubProperties.setFlowSummary(true);
     }
 
 
@@ -317,17 +320,6 @@ public class GitHubCommentsASTSteps {
         flowSummary.put("Info", info);
         scanResultsToInject.getAdditionalDetails().put("flow-summary", flowSummary);
     }
-//
-//    private void addAdditionalInfoToResults() {
-//        scanResultsToInject.getAdditionalDetails().put("numFailedLoc", 0);
-//        scanResultsToInject.getAdditionalDetails().put("scanRiskSeverity", 0);
-//        scanResultsToInject.getAdditionalDetails().put("scanId", 100001);
-//        scanResultsToInject.getAdditionalDetails().put("scanStartDate", new Date());
-//        scanResultsToInject.getAdditionalDetails().put("customFields", new HashMap<>());
-//        scanResultsToInject.getAdditionalDetails().put("scanRisk", 0);
-//
-//
-//    }
 
     private ScanRequest createScanRequest() {
         ScanRequest scanRequest = new ScanRequest();
@@ -397,30 +389,47 @@ public class GitHubCommentsASTSteps {
     @Then("we should see the expected number of results in comments")
     public void verifyComments(){
 
-        int highCounter = StringUtils.countMatches(comment, "HIGH");
-        int mediumCounter = StringUtils.countMatches(comment, "MEDIUM");
-        int lowCounter = StringUtils.countMatches(comment, "LOW");
+        int actaulHighCounter = StringUtils.countMatches(comment, "HIGH");
+        int actualMediumCounter = StringUtils.countMatches(comment, "MEDIUM");
+        int actaulLowCounter = StringUtils.countMatches(comment, "LOW");
 
         
         if (scannerType.equalsIgnoreCase(AST_SCA)) {
             Assert.assertTrue(PullRequestCommentsHelper.isSastAndScaComment(comment) );
+
+            Assert.assertEquals(scanResultsToInject.getAstResults().getSummary().getHighVulnerabilityCount()+
+                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.HIGH), actaulHighCounter);
+            Assert.assertEquals(scanResultsToInject.getAstResults().getSummary().getMediumVulnerabilityCount() +
+                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.MEDIUM), actualMediumCounter);
             
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getHighVulnerabilityCount()+
-                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.HIGH), highCounter);
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getMediumVulnerabilityCount() +
-                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.MEDIUM), mediumCounter);
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getLowVulnerabilityCount()+
-                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.LOW), lowCounter);
+            // add 1 to the results 
+            Assert.assertEquals(scanResultsToInject.getAstResults().getSummary().getLowVulnerabilityCount()+ 1 +
+                    scanResultsToInject.getScaResults().getSummary().getFindingCounts().get(Filter.Severity.LOW), actaulLowCounter);
 
         }
         else if (scannerType.equalsIgnoreCase(AST)) {
+            
             Assert.assertTrue(PullRequestCommentsHelper.isSastFindingsComment(comment));
 
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getHighVulnerabilityCount(), highCounter);
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getMediumVulnerabilityCount(), mediumCounter);
-            Assert.assertEquals(scanResultsToInject.getAstResults().getResults().getSummary().getLowVulnerabilityCount(), lowCounter);
-
+            int expectedHigh = getExpectedResults(scanResultsToInject.getAstResults().getSummary().getHighVulnerabilityCount());
+            int expectedMedium = getExpectedResults(scanResultsToInject.getAstResults().getSummary().getMediumVulnerabilityCount());
+            int expectedLow = getExpectedResults(scanResultsToInject.getAstResults().getSummary().getLowVulnerabilityCount());
+            
+            Assert.assertEquals(expectedHigh  , actaulHighCounter);
+            Assert.assertEquals(expectedMedium  , actualMediumCounter);
+            Assert.assertEquals(expectedLow , actaulLowCounter);
+    
+            if(!comment.contains(NO_POLICY_VIOLATION_MESSAGE)) {
+                Assert.assertTrue(comment.contains(AST_WEB_REPORT_LINK));
+            }
         }
+
         
+    }
+
+    private int getExpectedResults(int vulnerabilityCount) {
+        
+        //adding 1 to the expected count since the severity string appears not only in the Summary section but also in in the Flow Summary Section
+        return vulnerabilityCount==0 ? 0 :  vulnerabilityCount + 1;
     }
 }

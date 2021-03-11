@@ -1,27 +1,36 @@
 package com.checkmarx.flow.utils;
 
 import com.google.common.base.Strings;
-import org.slf4j.Logger;
+import lombok.extern.slf4j.Slf4j;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
-import java.io.IOException;
+import java.io.*;
 import java.nio.file.FileSystems;
-import java.util.Arrays;
-import java.util.List;
-import java.util.Objects;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
+@Slf4j
 public class ZipUtils {
-    private static final Logger log = org.slf4j.LoggerFactory.getLogger(ZipUtils.class);
-
     private static final int DEFAULT_BUFFER_SIZE = 1024 * 4;
 
     private ZipUtils() {
+    }
+
+    public static File zipToTempFile(String fileToZip, String excludePatterns) throws IOException {
+        String targetFilename = "cx.".concat(UUID.randomUUID().toString()).concat(".zip");
+        String targetPath = FileSystems.getDefault()
+                .getPath(targetFilename)
+                .toAbsolutePath()
+                .toString();
+        zipFile(fileToZip, targetPath, excludePatterns);
+        File zippedFile = new File(targetPath);
+        log.debug("Creating temp file {}", zippedFile.getPath());
+        log.debug("free space {}", zippedFile.getFreeSpace());
+        log.debug("total space {}", zippedFile.getTotalSpace());
+        log.debug(zippedFile.getAbsolutePath());
+        return zippedFile;
     }
 
     public static void zipFile(String fileToZip, String zipFile, String excludePatterns)

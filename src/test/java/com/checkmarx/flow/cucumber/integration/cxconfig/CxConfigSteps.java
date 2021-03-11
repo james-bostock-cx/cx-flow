@@ -1,10 +1,7 @@
 package com.checkmarx.flow.cucumber.integration.cxconfig;
 
 import com.checkmarx.flow.CxFlowApplication;
-import com.checkmarx.flow.config.FindingSeverity;
-import com.checkmarx.flow.config.FlowProperties;
-import com.checkmarx.flow.config.GitHubProperties;
-import com.checkmarx.flow.config.JiraProperties;
+import com.checkmarx.flow.config.*;
 import com.checkmarx.flow.controller.GitHubController;
 import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.ControllerRequest;
@@ -14,11 +11,12 @@ import com.checkmarx.flow.exception.MachinaException;
 import com.checkmarx.flow.service.*;
 import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.cx.CxScanSummary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
+import com.checkmarx.sdk.service.CxService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -58,8 +56,9 @@ public class CxConfigSteps {
     public static final String CWE_89 = "89";
     private static final ObjectMapper mapper = new ObjectMapper();
 
-    private final CxClient cxClientMock;
+    private final CxService cxClientMock;
     private final GitHubService gitHubService;
+    private final GitHubAppAuthService gitHubAppAuthService;
     private GitHubController gitHubControllerSpy;
     private final ThresholdValidator thresholdValidator;
     private final FlowProperties flowProperties;
@@ -69,6 +68,8 @@ public class CxConfigSteps {
     private final HelperService helperService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
 
     private ScanResults scanResultsToInject;
 
@@ -83,9 +84,11 @@ public class CxConfigSteps {
 
     public CxConfigSteps(FlowProperties flowProperties, GitHubService gitHubService,
                          CxProperties cxProperties, GitHubProperties gitHubProperties, ConfigurationOverrider configOverrider, JiraProperties jiraProperties,
-                         ThresholdValidator thresholdValidator, FilterFactory filterFactory, FlowService flowService, EmailService emailService) {
+                         ThresholdValidator thresholdValidator, FilterFactory filterFactory, FlowService flowService, EmailService emailService,
+                         ScmConfigOverrider scmConfigOverrider, GitHubAppAuthService gitHubAppAuthService,
+                         GitAuthUrlGenerator gitAuthUrlGenerator) {
 
-        this.cxClientMock = mock(CxClient.class);
+        this.cxClientMock = mock(CxService.class);
 
         this.flowProperties = flowProperties;
 
@@ -100,6 +103,9 @@ public class CxConfigSteps {
         this.gitHubProperties = gitHubProperties;
         this.filterFactory = filterFactory;
         this.configOverrider = configOverrider;
+        this.scmConfigOverrider = scmConfigOverrider;
+        this.gitHubAppAuthService = gitHubAppAuthService;
+        this.gitAuthUrlGenerator = gitAuthUrlGenerator;
         initGitHubProperties();
     }
 
@@ -182,6 +188,10 @@ public class CxConfigSteps {
         owner.setName("");
         owner.setLogin("cxflowtestuser");
         repo.setOwner(owner);
+
+        Repo r = new Repo();
+        r.setOwner(owner);
+
         pullEvent.setRepository(repo);
         pullEvent.setAction("opened");
         PullRequest pullRequest = new PullRequest();
@@ -189,6 +199,7 @@ public class CxConfigSteps {
         Head headBranch = new Head();
         headBranch.setRef(sourceBranch);
 
+        headBranch.setRepo(r);
         pullRequest.setHead(headBranch);
         pullRequest.setBase(new Base());
         pullRequest.setStatusesUrl("");
@@ -309,10 +320,10 @@ public class CxConfigSteps {
     }
 
     private void validateRequestFilter() {
-        List<Filter> filters = request.getFilter().getSimpleFilters();
+        List<Filter> filters = request.getFilter().getSastFilters().getSimpleFilters();
         List<String> filterSeverity = getFilter(filters, Filter.Type.SEVERITY);
         List<String> filterCwe = getFilter(filters, Filter.Type.CWE);
-        List<String> filterCatergory = getFilter(filters, Filter.Type.TYPE);
+        List<String> filterCategory = getFilter(filters, Filter.Type.TYPE);
 
         boolean asExpected = false;
         switch (branch) {
@@ -321,20 +332,20 @@ public class CxConfigSteps {
                 asExpected = filterSeverity.size() == 2 &&
                         filterSeverity.contains(FindingSeverity.HIGH.toString()) &&
                         filterSeverity.contains(FindingSeverity.MEDIUM.toString()) &&
-                        filterCwe.isEmpty() && filterCatergory.isEmpty();
+                        filterCwe.isEmpty() && filterCategory.isEmpty();
                 break;
             case "test8":
                 //Filter cwe: "79", "89"
                 asExpected = filterCwe.size() == 2 &&
                         filterCwe.contains(CWE_79) &&
                         filterCwe.contains(CWE_89) &&
-                        filterCatergory.isEmpty() && filterSeverity.isEmpty();
+                        filterCategory.isEmpty() && filterSeverity.isEmpty();
                 break;
             case "test9":
                 // filter category: "XSS_Reflected", "SQL_Injection"
-                asExpected = filterCatergory.size() == 2 &&
-                        filterCatergory.contains(XSS_REFLECTED) &&
-                        filterCatergory.contains(SQL_INJECTION) &&
+                asExpected = filterCategory.size() == 2 &&
+                        filterCategory.contains(XSS_REFLECTED) &&
+                        filterCategory.contains(SQL_INJECTION) &&
                         filterCwe.isEmpty() && filterSeverity.isEmpty();
                 break;
             case "test10":
@@ -344,9 +355,9 @@ public class CxConfigSteps {
                 asExpected = filterCwe.size() == 2 &&
                         filterCwe.contains(CWE_79) &&
                         filterCwe.contains(CWE_89) &&
-                        filterCatergory.size() == 2 &&
-                        filterCatergory.contains(XSS_REFLECTED) &&
-                        filterCatergory.contains(SQL_INJECTION) &&
+                        filterCategory.size() == 2 &&
+                        filterCategory.contains(XSS_REFLECTED) &&
+                        filterCategory.contains(SQL_INJECTION) &&
                         filterSeverity.isEmpty();
                 break;
             case "test11":
@@ -356,9 +367,9 @@ public class CxConfigSteps {
                         filterSeverity.size() == 2 &&
                                 filterSeverity.contains(FindingSeverity.HIGH.toString()) &&
                                 filterSeverity.contains(FindingSeverity.MEDIUM.toString()) &&
-                                filterCatergory.size() == 2 &&
-                                filterCatergory.contains(XSS_REFLECTED) &&
-                                filterCatergory.contains(SQL_INJECTION) &&
+                                filterCategory.size() == 2 &&
+                                filterCategory.contains(XSS_REFLECTED) &&
+                                filterCategory.contains(SQL_INJECTION) &&
                                 filterCwe.isEmpty();
                 break;
             case "test12":
@@ -366,7 +377,7 @@ public class CxConfigSteps {
                 asExpected = filterSeverity.size() == 2 &&
                         filterSeverity.contains(FindingSeverity.HIGH.toString()) &&
                         filterSeverity.contains(FindingSeverity.LOW.toString()) &&
-                        filterCwe.isEmpty() && filterCatergory.isEmpty();
+                        filterCwe.isEmpty() && filterCategory.isEmpty();
                 break;
             default:
                 fail("Invalid Branch");
@@ -465,6 +476,7 @@ public class CxConfigSteps {
 
         scanRequest.setBugTracker(BugTracker.builder().type(BugTracker.Type.GITHUBPULL).build());
         scanRequest.setMergeNoteUri(MERGE_NOTE_URL);
+        scanRequest.setRepoType(ScanRequest.Repository.GITHUB);
 
         HashMap<String, String> additionalMetdata = new HashMap<>();
         additionalMetdata.put("statuses_url", PULL_REQUEST_STATUSES_URL);
@@ -514,7 +526,7 @@ public class CxConfigSteps {
     }
 
     private void initMockGitHubController() {
-        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any());
+        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any(), any());
     }
 
     private void initServices() {
@@ -524,14 +536,15 @@ public class CxConfigSteps {
         // And thus it will work with real gitHubService
         this.gitHubControllerSpy = spy(new GitHubController(gitHubProperties,
                 flowProperties,
-                cxProperties,
                 jiraProperties,
                 flowService,
                 helperService,
                 gitHubService,
-                null,
+                gitHubAppAuthService,
                 filterFactory,
-                configOverrider));
+                configOverrider,
+                scmConfigOverrider,
+                gitAuthUrlGenerator));
 
         // results service will be a Mock and will work with gitHubService Mock
         // and will not connect to any external service.
@@ -546,19 +559,22 @@ public class CxConfigSteps {
         GitHubService gitHubServiceMock = new GitHubService(restTemplateMock,
                 gitHubProperties,
                 flowProperties,
-                thresholdValidator);
+                thresholdValidator,
+                scmConfigOverrider,
+                gitHubAppAuthService);
+
+        CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, cxClientMock, null );
 
         this.resultsService = new ResultsService(
-                cxClientMock,
+                cxScannerService,
                 null,
                 null,
                 null,
                 gitHubServiceMock,
                 null,
                 null,
-                null, emailService,
-                cxProperties,
-                flowProperties);
+                null,
+                emailService);
     }
 
     private static ScanResults createFakeScanResults() {

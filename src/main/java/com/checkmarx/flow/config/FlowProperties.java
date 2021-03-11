@@ -1,5 +1,6 @@
 package com.checkmarx.flow.config;
 
+import com.checkmarx.sdk.config.CxGoProperties;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 import org.springframework.validation.annotation.Validated;
@@ -25,6 +26,7 @@ public class FlowProperties {
     private List<String> filterStatus;
     private List<String> filterState;
     private String filterScript;
+    private String commentScript;
     private List<String> enabledVulnerabilityScanners;
     private boolean autoProfile = false;
     private boolean alwaysProfile = false;
@@ -102,6 +104,14 @@ public class FlowProperties {
 
     public void setFilterScript(String filterScript) {
         this.filterScript = filterScript;
+    }
+
+    public String getCommentScript() {
+        return commentScript;
+    }
+
+    public void setCommentScript(String commentScript) {
+        this.commentScript = commentScript;
     }
 
     public String getMitreUrl() {
@@ -314,6 +324,7 @@ public class FlowProperties {
         private List<String> cc;
         private boolean notificationEnabled = false;
         private boolean allowEmptyMail = false;
+        private String template;
 
         public String getHost() {
             return this.host;
@@ -366,6 +377,17 @@ public class FlowProperties {
         public void setAllowEmptyMail(boolean allowEmptyMail) {
             this.allowEmptyMail = allowEmptyMail;
         }
+
+        public String getTemplate() { return template; }
+
+        public void setTemplate(String template) { this.template = template; }
     }
 
+    public boolean isCxGoEnabled() {
+        return anyScannerEnabled() && enabledVulnerabilityScanners.toString().toLowerCase().contains(CxGoProperties.CONFIG_PREFIX);
+    }
+
+    private boolean anyScannerEnabled() {
+        return enabledVulnerabilityScanners != null && !enabledVulnerabilityScanners.isEmpty();
+    }
 }

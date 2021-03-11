@@ -53,7 +53,7 @@ public class RunningCxFlowSteps {
     }
 
     @When("running CxFlow with command line: {string}")
-    public void runningCxFlowWithCommandLineCommandLine(String commandLine) {
+    public void runningCxFlowWithCommandLine(String commandLine) {
         Throwable exception = null;
         try {
             TestUtils.runCxFlow(testContext.getCxFlowRunner(), commandLine);
@@ -106,7 +106,7 @@ public class RunningCxFlowSteps {
         }
         testContext.setOutputFilename(outputFilename);
 
-        String commandLineArgs = String.format("--parse --offline --%s --app=ABC --f=%s %s",
+        String commandLineArgs = String.format("--parse --offline --%s --app=ABC --bug-tracker=Json --f=%s %s",
                 CxFlowRunner.THROW_INSTEAD_OF_EXIT_OPTION,
                 inputFilePath,
                 customCommandLineArgs);

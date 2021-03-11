@@ -3,6 +3,7 @@ package com.checkmarx.flow.controller;
 import com.checkmarx.flow.config.ADOProperties;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.JiraProperties;
+import com.checkmarx.flow.constants.FlowConstants;
 import com.checkmarx.flow.dto.*;
 import com.checkmarx.flow.dto.ScanRequest.Product;
 import com.checkmarx.flow.dto.ScanRequest.ScanRequestBuilder;
@@ -17,11 +18,10 @@ import com.checkmarx.flow.service.FlowService;
 import com.checkmarx.flow.service.HelperService;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.MDC;
 import org.springframework.http.ResponseEntity;
@@ -43,7 +43,6 @@ public class TfsController extends AdoControllerBase {
 
     private final ADOProperties properties;
     private final FlowProperties flowProperties;
-    private final CxProperties cxProperties;
     private final JiraProperties jiraProperties;
     private final FlowService flowService;
     private final HelperService helperService;
@@ -62,7 +61,7 @@ public class TfsController extends AdoControllerBase {
         String action = getAction(httpRequest);
 
         String uid = helperService.getShortUid();
-        MDC.put("cx", uid);
+        MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
         if (log.isInfoEnabled()) {
             log.info(String.format("Processing TFS %s request", action));
         }
@@ -95,8 +94,6 @@ public class TfsController extends AdoControllerBase {
 
         FilterConfiguration filter = filterFactory.getFilter(controllerRequest, flowProperties);
 
-        setExclusionProperties(cxProperties, controllerRequest);
-
         ScanRequestBuilder requestBuilder = ScanRequest.builder()
                 .application(Optional.ofNullable(controllerRequest.getApplication()).orElse(app))
                 .product(getProductForName(product))
@@ -105,8 +102,8 @@ public class TfsController extends AdoControllerBase {
                 .namespace(repository.getProject().getName().replace(" ", "_"))
                 .repoName(repository.getName())
                 .repoType(ScanRequest.Repository.ADO)
-                .incremental(isScanIncremental(controllerRequest, cxProperties))
-                .scanPreset(Optional.ofNullable(controllerRequest.getPreset()).orElse(cxProperties.getScanPreset()))
+                .scanPreset(controllerRequest.getPreset())
+                .incremental(controllerRequest.getIncremental())
                 .excludeFolders(controllerRequest.getExcludeFolders())
                 .excludeFiles(controllerRequest.getExcludeFiles())
                 .filter(filter);

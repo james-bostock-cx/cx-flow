@@ -2,6 +2,8 @@ package com.checkmarx.flow.cucumber.integration.cxconfig;
 
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitHubProperties;
+import com.checkmarx.flow.config.JiraProperties;
+import com.checkmarx.flow.config.ScmConfigOverrider;
 import com.checkmarx.flow.controller.GitHubController;
 import com.checkmarx.flow.dto.github.PullEvent;
 import com.checkmarx.flow.service.*;
@@ -30,9 +32,12 @@ public class ConfigAsCodeBranchSteps {
     private final HelperService helperService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
-
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitHubAppAuthService gitHubAppAuthService;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
     private String defaultBranch;
     private String actualBranch;
+
 
     @Given("use-config-as-code-from-default-branch property in application.yml is set to {string}")
     public void useConfigAsCodeFromDefaultBranch(String useDefaultBranch) {
@@ -63,19 +68,23 @@ public class ConfigAsCodeBranchSteps {
         // Don't start automation.
         FlowService flowServiceMock = mock(FlowService.class);
 
-        GitHubService gitHubService = new GitHubService(restTemplateMock, gitHubProperties, flowProperties, null);
+        GitHubService gitHubService = new GitHubService(restTemplateMock, gitHubProperties, flowProperties, null, scmConfigOverrider, gitHubAppAuthService);
+        GitHubAppAuthService gitHubAppAuthService = new GitHubAppAuthService(restTemplateMock, gitHubProperties);
 
         GitHubController gitHubControllerSpy = Mockito.spy(new GitHubController(gitHubProperties,
                 flowProperties,
-                cxProperties,
                 null,
                 flowServiceMock,
                 helperService,
                 gitHubService,
-                null,
+                gitHubAppAuthService,
                 filterFactory,
-                configOverrider));
-        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any());
+                configOverrider,
+                scmConfigOverrider,
+                gitAuthUrlGenerator));
+        
+        
+        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any(), any());
 
         return gitHubControllerSpy;
     }
