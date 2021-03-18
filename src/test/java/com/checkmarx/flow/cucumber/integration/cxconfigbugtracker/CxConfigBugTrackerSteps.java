@@ -4,6 +4,7 @@ import com.checkmarx.flow.CxFlowApplication;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitHubProperties;
 import com.checkmarx.flow.config.JiraProperties;
+import com.checkmarx.flow.config.ScmConfigOverrider;
 import com.checkmarx.flow.controller.GitHubController;
 import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.ControllerRequest;
@@ -16,7 +17,7 @@ import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.cx.CxScanSummary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.cucumber.java.Before;
@@ -30,6 +31,7 @@ import org.mockito.Mockito;
 import org.mockito.invocation.InvocationOnMock;
 import org.mockito.stubbing.Answer;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.util.*;
@@ -42,22 +44,24 @@ import static org.mockito.Mockito.*;
 @SpringBootTest(classes = {CxFlowApplication.class, CxConfigBugTrackerConfiguration.class, PublishUtils.class})
 @Slf4j
 public class CxConfigBugTrackerSteps {
-    private static final String PULL_REQUEST_STATUSES_URL = "statuses url stub";
     public static final String BRANCH_NAME = "udi-tests";
     public static final String CUSTOM_BEAN_NAME = "GitHub";
     public static final String GITHUB_USER = "cxflowtestuser";
 
     @Autowired
+    @Qualifier("cxConfigurationTestBean")
     private CxClient cxClientMock;
     private final GitHubService gitHubService;
+    private final GitHubAppAuthService gitHubAppAuthService;
     private GitHubController gitHubControllerSpy;
     private final ObjectMapper mapper = new ObjectMapper();
     private final FlowProperties flowProperties;
-    private final CxProperties cxProperties;
     private final GitHubProperties gitHubProperties;
     private final HelperService helperService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
 
     private ScanResults scanResultsToInject;
 
@@ -67,14 +71,14 @@ public class CxConfigBugTrackerSteps {
 
 
     public CxConfigBugTrackerSteps(FlowProperties flowProperties, GitHubService gitHubService,
-                                   CxProperties cxProperties, GitHubProperties gitHubProperties,
+                                   GitHubAppAuthService gitHubAppAuthService, GitHubProperties gitHubProperties,
                                    JiraProperties jiraProperties, GitHubController gitHubController,
-                                   FilterFactory filterFactory, ConfigurationOverrider configOverrider) {
+                                   FilterFactory filterFactory, ConfigurationOverrider configOverrider,
+                                   ScmConfigOverrider scmConfigOverrider, GitAuthUrlGenerator gitAuthUrlGenerator) {
 
 
         this.flowProperties = flowProperties;
-
-        this.cxProperties = cxProperties;
+        this.gitHubAppAuthService = gitHubAppAuthService;
         this.jiraProperties = jiraProperties;
         this.filterFactory = filterFactory;
         this.helperService = mock(HelperService.class);
@@ -83,6 +87,8 @@ public class CxConfigBugTrackerSteps {
         this.gitHubProperties = gitHubProperties;
         this.gitHubControllerSpy = gitHubController;
         this.configOverrider = configOverrider;
+        this.scmConfigOverrider = scmConfigOverrider;
+        this.gitAuthUrlGenerator = gitAuthUrlGenerator;
         initGitHubProperties();
     }
 
@@ -106,7 +112,7 @@ public class CxConfigBugTrackerSteps {
     }
 
     private void initGitHubControllerSpy() {
-        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any());
+        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any(), any());
     }
 
     private void fixBranch() {
@@ -155,7 +161,7 @@ public class CxConfigBugTrackerSteps {
         assertFlowPropertiesBugTracker("Json");
         ArgumentCaptor<ScanRequest> ac = ArgumentCaptor.forClass(ScanRequest.class);
         FlowService flowServiceMock = Mockito.mock(FlowService.class);
-        gitHubControllerSpy = new GitHubController(gitHubProperties,flowProperties, cxProperties, jiraProperties, flowServiceMock,helperService, gitHubService, null, filterFactory, configOverrider);
+        gitHubControllerSpy = new GitHubController(gitHubProperties,flowProperties, jiraProperties, flowServiceMock,helperService, gitHubService,gitHubAppAuthService, filterFactory, configOverrider, scmConfigOverrider, gitAuthUrlGenerator);
         gitHubControllerSpy = spy(gitHubControllerSpy);
         initGitHubControllerSpy();
         buildPullRequest();
@@ -168,7 +174,7 @@ public class CxConfigBugTrackerSteps {
         assertFlowPropertiesBugTracker("Json");
         ArgumentCaptor<ScanRequest> ac = ArgumentCaptor.forClass(ScanRequest.class);
         FlowService flowServiceMock = Mockito.mock(FlowService.class);
-        gitHubControllerSpy = new GitHubController(gitHubProperties,flowProperties, cxProperties, jiraProperties, flowServiceMock,helperService, gitHubService, null, filterFactory, configOverrider);
+        gitHubControllerSpy = new GitHubController(gitHubProperties,flowProperties, jiraProperties, flowServiceMock,helperService, gitHubService,gitHubAppAuthService, filterFactory, configOverrider, scmConfigOverrider, gitAuthUrlGenerator);
         gitHubControllerSpy = spy(gitHubControllerSpy);
         initGitHubControllerSpy();
         buildPushRequest();
@@ -193,21 +199,25 @@ public class CxConfigBugTrackerSteps {
 
     public void buildPullRequest() {
         PullEvent pullEvent = new PullEvent();
-        Repository repo = new Repository();
-        repo.setName("CxConfigTests");
+        Repository repository = new Repository();
+        repository.setName("CxConfigTests");
 
-        repo.setCloneUrl(gitHubProperties.getUrl());
+        repository.setCloneUrl(gitHubProperties.getUrl());
         Owner owner = new Owner();
         owner.setName("");
         owner.setLogin(GITHUB_USER);
-        repo.setOwner(owner);
-        pullEvent.setRepository(repo);
+        repository.setOwner(owner);
+        pullEvent.setRepository(repository);
         pullEvent.setAction("opened");
         PullRequest pullRequest = new PullRequest();
         pullRequest.setIssueUrl("");
+
+        Repo repo = new Repo();
+        repo.setOwner(owner);
+
         Head headBranch = new Head();
         headBranch.setRef(branch);
-
+        headBranch.setRepo(repo);
         pullRequest.setHead(headBranch);
         pullRequest.setBase(new Base());
         pullRequest.setStatusesUrl("");

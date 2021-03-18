@@ -8,7 +8,7 @@ import com.atlassian.jira.rest.client.api.domain.SearchResult;
 import com.atlassian.jira.rest.client.internal.async.CustomAsynchronousJiraRestClientFactory;
 import com.checkmarx.flow.config.JiraProperties;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -82,14 +82,17 @@ public class JiraTestUtils implements IJiraTestUtils {
         return geAllIssuesInProject(projectKey).size();
     }
 
-    private Set<Issue> geAllIssuesInProject(String projectKey) {
-        Set<Issue> result = new HashSet<>();
-        SearchResult searchResult = search(getSearchAllProjectJql(projectKey));
-        searchResult.getIssues().forEach(result::add);
-        while (result.size() < searchResult.getTotal()) {
-            searchResult = search(getSearchAllProjectJql(projectKey), result.size());
-            searchResult.getIssues().forEach(result::add);
+    @Override
+    public Set<Issue> geAllIssuesInProject(String projectKey) {
+        List<Issue> issues = new ArrayList<>();
+        SearchResult searchResult = search(getSearchAllProjectJql(projectKey), issues.size());
+        searchResult.getIssues().forEach(issues::add);
+        while (issues.size() < searchResult.getTotal()) {
+            searchResult = search(getSearchAllProjectJql(projectKey), issues.size());
+            searchResult.getIssues().forEach(issues::add);
         }
+        Set<Issue> result = new HashSet<>(issues);
+        log.info("found {} issues in project '{}'", issues.size(), projectKey);
         return result;
     }
 
@@ -107,7 +110,7 @@ public class JiraTestUtils implements IJiraTestUtils {
 
             // iterate over enums using for loop 
             for (Filter.Severity s : Filter.Severity.values()) {
-                log.info("Comparing Filter Severity: '" + s.name() + "' to  '" + severity + "'\n");
+                log.debug("Comparing Filter Severity: '" + s.name() + "' to  '" + severity + "'\n");
                 if(s.name().trim().equalsIgnoreCase(severity.trim())){
                     filterSeverity = s;
                 }
@@ -260,7 +263,7 @@ Line #222:
     public void ensureIssueTypeExists(String issueType) throws IOException {
         log.info("Making sure '{}' issue type exists in Jira.", issueType);
         if (isIssueTypeExits(issueType)) {
-            log.info("Issue Type {} alreadt exists", issueType);
+            log.info("Issue Type {} already exists", issueType);
             return;
         }
         ResourceCreationConfig config = getIssueCreationConfig(issueType);
@@ -432,7 +435,7 @@ Line #222:
         return result.getIssues().iterator().next();
     }
 
-    private SearchResult searchForAllIssues(String projectKey) {
+    public SearchResult searchForAllIssues(String projectKey) {
         return search(getSearchAllProjectJql(projectKey));
     }
 

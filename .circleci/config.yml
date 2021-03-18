@@ -5,10 +5,26 @@ executors:
     docker:
       - image: circleci/golang:1.9
 
+commands: # a reusable command with parameters
+  create-github-release:
+    description: Create Github Release or Pre-Release
+    parameters:
+      ghr-option:
+        default: ""
+        type: string
+    steps:
+      - run: |
+          go get github.com/tcnksm/ghr
+          VERSION=$(cat ./build/libs/version.txt)
+          rm ./build/libs/version.txt
+          mv build/libs/java11/repo-${VERSION}.jar build/libs/cx-flow-${VERSION}-java11.jar
+          ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -n ${VERSION} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} << parameters.ghr-option >> -delete ${VERSION} ./build/libs/
+
+
 jobs:
   build:
     docker:
-      - image: circleci/openjdk:8-jdk
+      - image: circleci/openjdk:11-jdk
     working_directory: ~/repo
     environment:
       MAVEN_OPTS: -Xmx3200m
@@ -20,9 +36,7 @@ jobs:
           key: v1-gradle-cache-{{ checksum "build.gradle" }}
       - run: ./gradlew clean build
       - run: ./gradlew -b build-11.gradle --build-cache assemble
-      - run: ./gradlew -b build-cxgo.gradle --build-cache assemble
       - run: ./gradlew -q getVersion > build/libs/version.txt
-      - run: ./gradlew -b build-cxgo.gradle -q getVersion > build/libs/cxgo/version.txt
       - save_cache:
           paths:
             - ~/.gradle/wrapper
@@ -51,7 +65,7 @@ jobs:
 
   sonar:
     docker:
-      - image: circleci/openjdk:8-jdk
+      - image: circleci/openjdk:11-jdk
     steps:
       - checkout
       - run:
@@ -123,16 +137,12 @@ jobs:
             docker build --target java11 \
               -t ${DOCKER_REPO}:${VERSION}-11 \
               .
-            docker build --target cxgo8 \
-              -t ${DOCKER_REPO}:${VERSION}-CXGO8 \
-              .
             docker push ${DOCKER_REPO}:${SHA1_SHORT}
       - run:
           name: Archive Docker images
           command: |
             VERSION=$(cat ./build/libs/version.txt)
             docker save -o image-11.tar ${DOCKER_REPO}:${VERSION}-11
-            docker save -o image-cxgo8.tar ${DOCKER_REPO}:${VERSION}-CXGO8
             docker save -o image-8.tar ${DOCKER_REPO}:${VERSION}-8
             docker save -o image.tar ${DOCKER_REPO}:${VERSION}
             docker save -o latest.tar ${DOCKER_REPO}:latest
@@ -140,7 +150,6 @@ jobs:
           root: .
           paths:
             - ./image-11.tar
-            - ./image-cxgo8.tar
             - ./image-8.tar
             - ./image.tar
             - ./latest.tar
@@ -186,14 +195,9 @@ jobs:
       - helm/install-helm-client:
           version: << parameters.version >>
       - run:
-          name: Install k8s-external-secret service on cluster
-          command: |
-             helm repo add external-secrets https://godaddy.github.io/kubernetes-external-secrets/
-             helm upgrade --install --create-namespace external-secret-${CIRCLE_SHA1::7} --namespace << parameters.namespace >> --set env.AWS_REGION=eu-west-1 external-secrets/kubernetes-external-secrets
-      - run:
           name: Install cxflow service on cluster
           command: |
-            helm upgrade --install --atomic --namespace << parameters.namespace >> << parameters.release-name >> \
+            helm upgrade --install --atomic --create-namespace --namespace << parameters.namespace >> << parameters.release-name >> \
               --set cxflow.githubToken=${GITHUB_TOKEN} \
               --set cxflow.githubWebhookToken=${GITHUB_WEBHOOK_TOKEN} \
               --set cxflow.jiraUrl=${JIRA_URL} \
@@ -201,6 +205,9 @@ jobs:
               --set cxflow.jiraToken=${JIRA_TOKEN} \
               --set cxflow.jiraProject=${JIRA_PROJECT} \
               --set cxflow.azureToken=${AZURE_TOKEN} \
+              --set cxflow.gitlabToken=${GITLAB_TOKEN} \
+              --set cxflow.gitlabConfigAsCode=${GITLAB_CONFIG_AS_CODE} \
+              --set cxflow.gitlabWebhookToken=${GITLAB_WEBHOOK_TOKEN} \
               --set ingress.hosts[0].host=<< parameters.release-name >>.${EXTERNAL_DNS_DOMAIN} \
               --set ingress.hosts[0].paths[0]="/*" \
               << parameters.chart >>
@@ -260,7 +267,8 @@ jobs:
           command: |
             export GITHUB_HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
             export ADO_HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
-            ./gradlew clean e2eTests --info -DGITHUB_target=${GITHUB_HOOK_TARGET} -DGITHUB_repo=${GITHUB_HOOK_REPO} -DGITHUB_repo_SCA=${GITHUB_HOOK_REPO_SCA} -DGITHUB_namespace=${GITHUB_HOOK_NAMESPACE} -DADO_target=${ADO_HOOK_TARGET} -DADO_repo=${ADO_HOOK_REPO}-DADO_namespace=${ADO_HOOK_NAMESPACE}
+            export GITLAB_HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
+            ./gradlew clean e2eTests --info -DGITHUB_target=${GITHUB_HOOK_TARGET} -DGITHUB_repo=${GITHUB_HOOK_REPO} -DGITHUB_repo_SCA=${GITHUB_HOOK_REPO_SCA} -DGITHUB_namespace=${GITHUB_HOOK_NAMESPACE} -DADO_target=${ADO_HOOK_TARGET} -DADO_repo=${ADO_HOOK_REPO} -DADO_namespace=${ADO_HOOK_NAMESPACE} -DGITLAB_target=${GITLAB_HOOK_TARGET} -DGITLAB_repo=${GITLAB_HOOK_REPO} -DGITLAB_namespace=${GITLAB_HOOK_NAMESPACE}
       - run:
           name: Save test results
           command: |
@@ -413,10 +421,73 @@ jobs:
     steps:
       - checkout
       - run:
-          name: Run SAST CLI Integration Tests
+          name: Run SCA CLI Integration Tests
           command: |
             export HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
             ./gradlew clean ScaCliIntegrationTest --info -Dtarget=${HOOK_TARGET} -Drepo=${HOOK_REPO} -Dnamespace=${HOOK_NAMESPACE}
+      - run:
+          name: Save test results
+          command: |
+            mkdir -p ~/test-results/junit/
+            find . -type f -regex ".*/build/test-results/.*xml" -exec cp {} ~/test-results/junit/ \;
+          when: always
+      - store_test_results:
+          path: ~/test-results
+      - store_artifacts:
+          path: ~/test-results/junit
+
+  AST-CLI-integration-tests:
+    docker:
+      - image: "circleci/openjdk:8-jdk"
+    steps:
+      - checkout
+      - run:
+          name: Run AST CLI Integration Tests
+          command: |
+            export HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
+            ./gradlew clean AstCliIntegrationTest --info -Dtarget=${HOOK_TARGET} -Drepo=${HOOK_REPO} -Dnamespace=${HOOK_NAMESPACE}
+      - run:
+          name: Save test results
+          command: |
+            mkdir -p ~/test-results/junit/
+            find . -type f -regex ".*/build/test-results/.*xml" -exec cp {} ~/test-results/junit/ \;
+          when: always
+      - store_test_results:
+          path: ~/test-results
+      - store_artifacts:
+          path: ~/test-results/junit
+
+  CxGo-integration-tests:
+                  docker:
+                    - image: "circleci/openjdk:8-jdk"
+                  steps:
+                    - checkout
+                    - run:
+                        name: Run CxGo Integration Tests
+                        command: |
+                          export HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
+                          ./gradlew clean CxGoIntegrationTest --info -Dtarget=${HOOK_TARGET} -Drepo=${HOOK_REPO} -Dnamespace=${HOOK_NAMESPACE}
+                    - run:
+                        name: Save test results
+                        command: |
+                          mkdir -p ~/test-results/junit/
+                          find . -type f -regex ".*/build/test-results/.*xml" -exec cp {} ~/test-results/junit/ \;
+                        when: always
+                    - store_test_results:
+                        path: ~/test-results
+                    - store_artifacts:
+                        path: ~/test-results/junit
+
+  CodeBashing-integration-tests:
+    docker:
+      - image: "circleci/openjdk:8-jdk"
+    steps:
+      - checkout
+      - run:
+          name: Run CodeBashing Integration Tests
+          command: |
+            export HOOK_TARGET=https://cxflow-${CIRCLE_SHA1::7}.${EXTERNAL_DNS_DOMAIN}
+            ./gradlew clean CodeBashingIntegrationTest --info -Dtarget=${HOOK_TARGET} -Drepo=${HOOK_REPO} -Dnamespace=${HOOK_NAMESPACE}
       - run:
           name: Save test results
           command: |
@@ -473,7 +544,6 @@ jobs:
             docker load -i /tmp/workspace/image-8.tar
             docker load -i /tmp/workspace/image.tar
             docker load -i /tmp/workspace/latest.tar
-            docker load -i /tmp/workspace/image-cxgo8.tar
       - run:
           name: Publish Docker images to Docker Hub
           command: |
@@ -486,16 +556,16 @@ jobs:
     steps:
       - attach_workspace:
           at: .
-      - run:
-          name: "Publish Release on GitHub"
-          command: |
-            go get github.com/tcnksm/ghr
-            VERSION=$(cat ./build/libs/version.txt)
-            rm ./build/libs/version.txt
-            VERSION_OD=$(cat ./build/libs/cxgo/version.txt)
-            mv build/libs/java11/repo-${VERSION}.jar build/libs/cx-flow-${VERSION}-java11.jar
-            mv build/libs/cxgo/repo-${VERSION_OD}.jar build/libs/${VERSION_OD}.jar
-            ghr -t ${GITHUB_TOKEN} -u ${CIRCLE_PROJECT_USERNAME} -n ${VERSION} -r ${CIRCLE_PROJECT_REPONAME} -c ${CIRCLE_SHA1} -delete ${VERSION} ./build/libs/
+      - create-github-release
+
+  publish-github-pre-release:
+    docker:
+      - image: circleci/golang:1.9
+    steps:
+      - attach_workspace:
+          at: .
+      - create-github-release:
+          ghr-option: "-prerelease "
 
   clean-eks:
     executor: aws-eks/python3
@@ -517,7 +587,7 @@ jobs:
             fi
 
 orbs:
-  aws-eks: circleci/aws-eks@0.2.6
+  aws-eks: circleci/aws-eks@1.0.0
   kubernetes: circleci/kubernetes@0.4.0
   helm: circleci/helm@0.2.3
   checkmarx: checkmarx/circleci-kpi-shipper@0.10.0
@@ -562,7 +632,7 @@ workflows:
           chart: ./helm/cxflow
           namespace: cxflow-${CIRCLE_SHA1::7}
           release-name: cxflow-${CIRCLE_SHA1::7}
-          version: v3.2.1
+          version: v3.3.4
           filters:
             branches:
               only:
@@ -608,6 +678,31 @@ workflows:
       - SCA-CLI-integration-tests:
           requires:
             - deploy-cxflow
+      - AST-CLI-integration-tests:
+          requires:
+            - deploy-cxflow
+      - CxGo-integration-tests:
+          requires:
+            - deploy-cxflow
+      - CodeBashing-integration-tests:
+          requires:
+            - deploy-cxflow
+      - publish-github-pre-release:
+          filters:
+            branches:
+              only: develop
+          requires:
+            - e2e-tests
+            - integration-tests
+            - sca-integration-tests
+            - ast-integration-tests
+            - jira-integration-tests
+            - pullRequestComments-integration-tests
+            - SAST-CLI-integration-tests
+            - SCA-CLI-integration-tests
+            - AST-CLI-integration-tests
+            - CxGo-integration-tests
+            - CodeBashing-integration-tests
       - docker-push-stable:
           filters:
             branches:
@@ -620,7 +715,9 @@ workflows:
             - jira-integration-tests
             - pullRequestComments-integration-tests
             - SAST-CLI-integration-tests
-            - SCA-CLI-integration-tests
+            - AST-CLI-integration-tests
+            - CxGo-integration-tests
+            - CodeBashing-integration-tests
       - publish-github-release:
           filters:
             branches:
@@ -634,11 +731,14 @@ workflows:
             - pullRequestComments-integration-tests
             - SAST-CLI-integration-tests
             - SCA-CLI-integration-tests
+            - AST-CLI-integration-tests
+            - CxGo-integration-tests
+            - CodeBashing-integration-tests
       - cleanup:
           cluster-name: eks-cxflow-ci
           namespace: cxflow-${CIRCLE_SHA1::7}
           release-name: cxflow-${CIRCLE_SHA1::7}
-          version: v3.2.1
+          version: v3.3.4
           filters:
             branches:
               only:
@@ -655,6 +755,9 @@ workflows:
             - pullRequestComments-integration-tests
             - SAST-CLI-integration-tests
             - SCA-CLI-integration-tests
+            - AST-CLI-integration-tests
+            - CxGo-integration-tests
+            - CodeBashing-integration-tests
   nightly-cleanup:
     triggers:
       - schedule:

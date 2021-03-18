@@ -11,8 +11,9 @@ import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.ScaConfig;
 import com.checkmarx.sdk.config.ScaProperties;
 import com.checkmarx.sdk.dto.ScanResults;
-import com.cx.restclient.dto.scansummary.Severity;
-import com.cx.restclient.ast.dto.sca.report.Finding;
+import com.checkmarx.sdk.dto.sca.SCAResults;
+import com.checkmarx.sdk.dto.scansummary.Severity;
+import com.checkmarx.sdk.dto.sca.report.Finding;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
@@ -21,11 +22,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 
-import java.util.EnumMap;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Optional;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Service
@@ -40,12 +37,15 @@ public class ThresholdValidatorImpl implements ThresholdValidator {
     private final ScaProperties scaProperties;
     private final SastScanner sastScanner;
     private final SCAScanner scaScanner;
+    private final CxGoScanner cxgoScanner;
 
     @Autowired
     public ThresholdValidatorImpl(@Lazy SastScanner sastScanner, @Lazy SCAScanner scaScanner,
+                                  @Lazy CxGoScanner cxgoScanner, 
                                   FlowProperties flowProperties, ScaProperties scaProperties) {
         this.sastScanner = sastScanner;
         this.scaScanner = scaScanner;
+        this.cxgoScanner = cxgoScanner;
         this.flowProperties = flowProperties;
         this.scaProperties = scaProperties;
     }
@@ -53,10 +53,22 @@ public class ThresholdValidatorImpl implements ThresholdValidator {
     @Override
     public boolean isMergeAllowed(ScanResults scanResults, RepoProperties repoProperties, PullRequestReport pullRequestReport) {
         OperationResult requestResult = new OperationResult(OperationStatus.SUCCESS, MERGE_SUCCESS_DESCRIPTION);
-        boolean isMergeAllowed = isAllowed(scanResults, repoProperties, pullRequestReport);
+        boolean isMergeAllowed = true;
 
-        if (!isMergeAllowed) {
-            requestResult = new OperationResult(OperationStatus.FAILURE, MERGE_FAILURE_DESCRIPTION);
+        if (!repoProperties.isErrorMerge()) {
+            log.info("Merge is allowed, because error-merge is set to false.");
+            pullRequestReport.setPullRequestResult(requestResult);
+        }
+        else{
+            isMergeAllowed = isAllowed(scanResults, pullRequestReport.getScanRequest());
+
+            if (!isMergeAllowed) {
+                log.info("Merge is not allowed because some of the checks weren't passed");
+                requestResult = new OperationResult(OperationStatus.FAILURE, MERGE_FAILURE_DESCRIPTION);
+            }
+            else{
+                log.info("Merge is allowed. all checks passed");
+            }
         }
 
         pullRequestReport.setPullRequestResult(requestResult);
@@ -64,62 +76,136 @@ public class ThresholdValidatorImpl implements ThresholdValidator {
         return isMergeAllowed;
     }
 
-    private boolean isAllowed(ScanResults scanResults, RepoProperties repoProperties, PullRequestReport pullRequestReport) {
-        if (!repoProperties.isErrorMerge()) {
-            log.info("Merge is allowed, because error-merge is set to false.");
-            return true;
-        }
-
-        boolean isAllowed = true;
-        if (isSast()) {
-            isAllowed = isAllowedSast(scanResults, pullRequestReport);
-        }
-
-        if (isAllowed && scaScanner.isEnabled()) {
-            isAllowed = isAllowedSca(scanResults, pullRequestReport);
-        }
-
-        return isAllowed;
+    @Override
+    public boolean thresholdsExceeded(ScanRequest request, ScanResults results){
+        return !isAllowed(results, request);
     }
 
-    private boolean isSast() {
+    @Override
+    public boolean isThresholdsConfigurationExist(ScanRequest scanRequest){
+        boolean sastThresholds;
+        boolean scaThresholds = false;
+
+        sastThresholds = scanRequest.getThresholds() != null || flowProperties.getThresholds() != null;
+        if(scaProperties != null){
+            scaThresholds = scaProperties.getThresholdsSeverity() != null || scaProperties.getThresholdsScore() != null;
+        }
+
+        if (!scaThresholds && scanRequest.getScaConfig() != null) {
+            Map<Severity, Integer> scaThresholdsSeverity = scanRequest.getScaConfig().getThresholdsSeverity();
+            scaThresholds = (scaThresholdsSeverity != null && scaThresholdsSeverity.size() > 0) || scanRequest.getScaConfig().getThresholdsScore() != null;
+        }
+
+        log.info("Checking Thresholds exists. sast thresholds: {}. sca thresholds: {}", sastThresholds, scaThresholds);
+        return  sastThresholds || scaThresholds;
+    }
+
+    private boolean isAllowed(ScanResults scanResults, ScanRequest request) {
+
+        boolean isSastAllowed = !isSastScan() || isAllowedSast(scanResults, request);
+        boolean isScaAllowed = !isScaScan() || isAllowedSca(scanResults, request);
+        boolean isGoAllowed = !isGoScan() || isAllowedGo(scanResults, request);
+        
+        return isSastAllowed && isScaAllowed && isGoAllowed;
+    }
+
+    private boolean isAllowedGo(ScanResults scanResults, ScanRequest request) {
+        
+        Map<FindingSeverity, Integer> thresholds = getCxFlowLevelEffectiveThresholds(request);
+        writeMapToLog(thresholds, "Using CxSAST thresholds");
+
+        boolean isAllowedSast = !isAnySastThresholdExceeded(scanResults, thresholds);
+        logIsAllowed(isAllowedSast);
+        
+        writeMapToLog(thresholds, "Using CxSCA thresholds severity");
+        Map<Severity, Integer> thresholdsSca = convertSeverityMap(thresholds);
+
+        boolean isAllowedSca = !isAnyScaThresholdsExceeded(scanResults, thresholdsSca, 0.0);
+        logIsAllowed(isAllowedSca);
+        
+        return isAllowedSast && isAllowedSca;
+    }
+
+    private Map<Severity, Integer> convertSeverityMap(Map<FindingSeverity, Integer> thresholds) {
+        Map<Severity, Integer> thresholdsSca = new EnumMap<>(Severity.class);
+
+        thresholds.entrySet().forEach(entry -> {
+            switch(entry.getKey()) {
+                case HIGH:
+                    thresholdsSca.put(Severity.HIGH, entry.getValue());
+                    break;
+                case MEDIUM:
+                    thresholdsSca.put(Severity.MEDIUM, entry.getValue());
+                    break;
+                case LOW:
+                    thresholdsSca.put(Severity.LOW, entry.getValue());   
+                    break;
+                default:
+                    break;    
+            }
+        });
+        return thresholdsSca;
+    }
+
+    private boolean isGoScan() {
+        return cxgoScanner.isEnabled();
+    }
+
+    private boolean isScaScan() {
+        return scaScanner.isEnabled();
+    }
+
+
+    private boolean isSastScan() {
         return sastScanner.isEnabled();
     }
 
-    private boolean isAllowedSca(ScanResults scanResults, PullRequestReport pullRequestReport) {
+    private boolean isAllowedSca(ScanResults scanResults, ScanRequest request) {
         log.debug("Checking if CxSCA pull request merge is allowed.");
-        Map<Severity, Integer> scaThresholdsSeverity = getScaEffectiveThresholdsSeverity(pullRequestReport.getScanRequest());
-        Double scaThresholdsScore = getScaEffectiveThresholdsScore(pullRequestReport.getScanRequest());
+        Map<Severity, Integer> scaThresholdsSeverity = getScaEffectiveThresholdsSeverity(request);
+        Double scaThresholdsScore = getScaEffectiveThresholdsScore(request);
 
-        writeMapToLog(scaThresholdsSeverity, "Using CxSCA thresholds severity");
-        writeMapToLog(scaThresholdsScore, "Using CxSCA thresholds score");
-        pullRequestReport.setScaThresholdsSeverity(scaThresholdsSeverity);
-        pullRequestReport.setScaThresholdsScore(scaThresholdsScore);
 
-        boolean isAllowedSca = !isAnyScaThresholdsExceeded(scanResults, scaThresholdsSeverity, scaThresholdsScore, pullRequestReport);
-        isAllowedScannerToLog(isAllowedSca);
+        boolean isAllowedSca;
+        // isPolicyViolated flag gets the top priority whether to the break build or not
+        SCAResults scaResults = scanResults.getScaResults();
+        if (scaResults.isPolicyViolated()) {
+            printViolatedPoliciesNames(scaResults.getViolatedPolicies());
+            isAllowedSca = false;
+        } else {
+            writeMapToLog(scaThresholdsSeverity, "Using CxSCA thresholds severity");
+            writeMapToLog(scaThresholdsScore, "Using CxSCA thresholds score");
+            isAllowedSca = !isAnyScaThresholdsExceeded(scanResults, scaThresholdsSeverity, scaThresholdsScore);
+            logIsAllowed(isAllowedSca);
+        }
 
         return isAllowedSca;
     }
 
-    private boolean isAllowedSast(ScanResults scanResults, PullRequestReport pullRequestReport) {
-        log.debug("Checking if CxSAST pull request merge is allowed.");
-        Map<FindingSeverity, Integer> thresholds = getSastEffectiveThresholds(pullRequestReport.getScanRequest());
-        writeMapToLog(thresholds, "Using CxSAST thresholds");
-        pullRequestReport.setThresholds(thresholds);
+    private void printViolatedPoliciesNames(List<String> violatedPoliciesNames) {
+        log.info("SCA current scan violated {} defined policies", violatedPoliciesNames.size());
+        String policiesViolatedName = violatedPoliciesNames.stream()
+                .collect(Collectors.joining("', '", "'", "'"));
+        log.info(policiesViolatedName);
+    }
 
-        boolean isAllowed = !isAnySastThresholdExceeded(scanResults, thresholds, pullRequestReport);
-        isAllowedScannerToLog(isAllowed);
+    private boolean isAllowedSast(ScanResults scanResults, ScanRequest request) {
+        log.debug("Checking if CxSAST pull request merge is allowed.");
+        Map<FindingSeverity, Integer> thresholds = getCxFlowLevelEffectiveThresholds(request);
+        writeMapToLog(thresholds, "Using CxSAST thresholds");
+
+        boolean isAllowed = !isAnySastThresholdExceeded(scanResults, thresholds);
+        logIsAllowed(isAllowed);
 
         return isAllowed;
     }
 
-    private void isAllowedScannerToLog(boolean isAllowedScanner) {
-        log.info(isAllowedScanner ? "Merge is allowed, because no thresholds were exceeded." :
-                "Merge is not allowed, because some of the thresholds were exceeded.");
+    private void logIsAllowed(boolean isAllowedScanner) {
+        log.info(isAllowedScanner ? "No thresholds were exceeded." :
+                "Thresholds were exceeded.");
     }
 
-    private Map<FindingSeverity, Integer> getSastEffectiveThresholds(ScanRequest scanRequest) {
+    private Map<FindingSeverity, Integer> getCxFlowLevelEffectiveThresholds(ScanRequest scanRequest) {
         Map<FindingSeverity, Integer> res;
 
         if (areSastThresholdsFromRequestDefined(scanRequest)) {
@@ -216,11 +302,10 @@ public class ThresholdValidatorImpl implements ThresholdValidator {
     }
 
     private static boolean isAnyScaThresholdsExceeded(ScanResults scanResults,  Map<Severity, Integer> scaThresholds,
-                                                      Double scaThresholdsScore, PullRequestReport pullRequestReport) {
+                                                      Double scaThresholdsScore) {
         boolean isExceeded = isExceedsScaThresholdsScore(scanResults, scaThresholdsScore);
 
         Map<Severity, Integer> scaFindingsCountsPerSeverity = getScaFindingsCountsPerSeverity(scanResults);
-        pullRequestReport.setScaFindingsSeverityCount(scaFindingsCountsPerSeverity);
 
         for (Map.Entry<Severity, Integer> entry : scaFindingsCountsPerSeverity.entrySet()) {
             Severity severity = entry.getKey();
@@ -250,10 +335,10 @@ public class ThresholdValidatorImpl implements ThresholdValidator {
         return isExceeded;
     }
 
-    private static boolean isAnySastThresholdExceeded(ScanResults scanResults, Map<FindingSeverity, Integer> sastThresholds, PullRequestReport pullRequestReport) {
+    private static boolean isAnySastThresholdExceeded(ScanResults scanResults, Map<FindingSeverity, Integer> sastThresholds) {
         boolean result = false;
         Map<FindingSeverity, Integer> findingsPerSeverity = getSastFindingCountPerSeverity(scanResults);
-        pullRequestReport.setFindingsPerSeverity(findingsPerSeverity);
+
         for (Map.Entry<FindingSeverity, Integer> entry : findingsPerSeverity.entrySet()) {
             if (isExceedsSastThreshold(entry, sastThresholds)) {
                 result = true;

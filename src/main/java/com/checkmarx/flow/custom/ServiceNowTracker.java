@@ -24,7 +24,6 @@ import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestOperations;
 
-import javax.annotation.PostConstruct;
 import java.net.URI;
 import java.util.List;
 import java.util.Optional;
@@ -186,12 +185,17 @@ public class ServiceNowTracker implements IssueTracker {
     @Override
     public Issue createIssue(ScanResults.XIssue resultIssue, ScanRequest request) throws MachinaException {
         log.debug("Executing createIssue ServiceNow API call");
+        String errorMessage = "Error occurred while creating ServiceNow Issue";
+
         try {
             Incident incident = getCreateIncident(resultIssue, request);
             String query = String.format("%s%s", properties.getApiUrl(), INCIDENTS);
-            URI uri = restOperations.postForLocation(query, incident);
+
+            URI uri = Optional.ofNullable(restOperations.postForLocation(query, incident))
+                    .orElseThrow(() -> new MachinaRuntimeException(errorMessage + " - URI returned NULL"));
             String sysId = getSysID(uri.getPath());
-            return getIncidentByIDConvertToIssue(sysId).get();
+            return getIncidentByIDConvertToIssue(sysId).orElseThrow(() -> new MachinaRuntimeException(errorMessage + " - could not convert to issue"));
+
         } catch (HttpClientErrorException e) {
             log.error("Error occurred while creating ServiceNow Issue");
             log.error(ExceptionUtils.getStackTrace(e));
@@ -361,7 +365,7 @@ public class ServiceNowTracker implements IssueTracker {
      */
     private Incident getCreateIncident(ScanResults.XIssue resultIssue, ScanRequest request) {
         String tag   = createServiceNowTag(request);
-        String title = getXIssueKey(resultIssue, request);
+        String title = HTMLHelper.getScanRequestIssueKeyWithDefaultProductValue(request, this, resultIssue);
         String body  = HTMLHelper.getTextBody(resultIssue, request, flowProperties);
 
         Incident incident = new Incident();

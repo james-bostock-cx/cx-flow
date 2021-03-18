@@ -3,14 +3,15 @@ package com.checkmarx.flow.cucumber.integration.sast.config;
 import com.checkmarx.flow.CxFlowApplication;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitHubProperties;
-import com.checkmarx.flow.controller.GitHubController;
+import com.checkmarx.flow.config.ScmConfigOverrider;
+import com.checkmarx.flow.controller.*;
 import com.checkmarx.flow.exception.MachinaException;
 import com.checkmarx.flow.service.*;
 import com.checkmarx.flow.utils.github.GitHubTestUtils;
 import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.cx.CxScanParams;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.CxService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -47,7 +48,7 @@ public class OverwritingProjectConfigSteps {
     private static final ObjectMapper jsonMapper = new ObjectMapper();
 
     @SpyBean
-    private final CxClient cxClientSpy;
+    private final CxService cxClientSpy;
 
     @MockBean
     private final ResultsService resultsServiceMock;
@@ -58,10 +59,13 @@ public class OverwritingProjectConfigSteps {
     private final GitHubTestUtils gitHubTestUtils;
     private final HelperService helperService;
     private final GitHubService gitHubService;
+    private final GitHubAppAuthService gitHubAppAuthService;
     private final FlowService flowService;
     private final SastScanner sastScanner;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
 
     private Integer projectId;
     private Integer interceptedScanId;
@@ -106,7 +110,7 @@ public class OverwritingProjectConfigSteps {
 
     @And("project has the {string} preset and the {string} scan configuration")
     public void projectPresetIs(String preset, String config) {
-        cxClientSpy.createScanSetting(projectId, presetMapping.get(preset), configMapping.get(config));
+        cxClientSpy.createScanSetting(projectId, presetMapping.get(preset), configMapping.get(config), 0);
     }
 
     @And("CxFlow config has the {string} preset and the {string} scan configuration")
@@ -123,8 +127,9 @@ public class OverwritingProjectConfigSteps {
     @When("GitHub notifies CxFlow about a pull request for the {string} project")
     public void githubNotifiesCxFlowAboutAPullRequest(String projectName) {
 
-        GitHubController gitHubController = new GitHubController(gitHubProperties, flowProperties, cxProperties,
-                null, flowService, helperService, gitHubService, sastScanner, filterFactory, configOverrider);
+        GitHubController gitHubController = new GitHubController(gitHubProperties, flowProperties,
+                null, flowService, helperService, gitHubService,gitHubAppAuthService, filterFactory, configOverrider,
+                scmConfigOverrider, gitAuthUrlGenerator);
 
         gitHubTestUtils.callController(gitHubController, GitHubTestUtils.EventType.PULL_REQUEST, projectName);
     }

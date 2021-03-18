@@ -1,10 +1,11 @@
 package com.checkmarx.flow.cucumber.integration.cli.sca;
 
 import com.checkmarx.flow.CxFlowApplication;
+import com.checkmarx.flow.CxFlowRunner;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.JiraProperties;
 import com.checkmarx.flow.cucumber.common.utils.TestUtils;
-import com.checkmarx.flow.cucumber.integration.cli.IntegrationTestContext;
+import com.checkmarx.flow.cucumber.integration.sca_scanner.ScaCommonSteps;
 import com.checkmarx.flow.exception.ExitThrowable;
 import com.checkmarx.jira.IJiraTestUtils;
 import com.checkmarx.jira.JiraTestUtils;
@@ -12,162 +13,244 @@ import com.checkmarx.sdk.config.ScaProperties;
 import io.cucumber.java.After;
 import io.cucumber.java.Before;
 import io.cucumber.java.PendingException;
+import io.cucumber.java.en.And;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.io.FileUtils;
+import org.apache.commons.io.file.PathUtils;
 import org.junit.Assert;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
+import java.util.UUID;
 
+/**
+ * This step implementation relies on specific projects that already exist in SCA (see customScaProjectName).
+ */
 @SpringBootTest(classes = {CxFlowApplication.class, JiraTestUtils.class})
 @Slf4j
 @RequiredArgsConstructor
 public class ScaCliSteps {
     private static final String REPO_ARGS = " --repo-url=https://github.com/cxflowtestuser/public-rest-repo --repo-name=CLI-public-rest-repo --branch=master --blocksysexit";
-    private static final String GITHUB_REPO_ARGS = REPO_ARGS.intern() + " --github ";
+    private static final String GITHUB_REPO_ARGS = REPO_ARGS + " --github ";
     private static final String JIRA_PROJECT = "SCIT";
+    private static final String DIRECTORY_TO_SCAN = "input-code-for-sca";
+    private static final String NO_FILTERS = "none";
+    private static final int AT_LEAST_ONE = Integer.MAX_VALUE;
 
     private final FlowProperties flowProperties;
     private final JiraProperties jiraProperties;
     private final ScaProperties scaProperties;
-    private final IntegrationTestContext testContext;
 
-    private String commandlineConstantArgs;
-    private int expectedHigh;
-    private int expectedMedium;
-    private int expectedLow;
+    private final CxFlowRunner cxFlowRunner;
+    private Throwable cxFlowExecutionException;
+    private String customScaProjectName;
+    private Path directoryToScan;
 
     @Autowired
     private IJiraTestUtils jiraUtils;
 
-    @Before("@SCA_CLI_SCAN")
+    @Before
     public void beforeEachScenario() throws IOException {
         log.info("Setting bugTracker: Jira");
         flowProperties.setBugTracker("JIRA");
-        initSCAConfig();
-        flowProperties.setEnabledVulnerabilityScanners(Collections.singletonList(ScaProperties.CONFIG_PREFIX));
+        ScaCommonSteps.initSCAConfig(scaProperties);
+
+        List<String> scaOnly = Collections.singletonList(ScaProperties.CONFIG_PREFIX);
+        flowProperties.setEnabledVulnerabilityScanners(scaOnly);
 
         log.info("Jira project key: {}", JIRA_PROJECT);
         jiraProperties.setProject(JIRA_PROJECT);
         initJiraBugTracker();
+        log.info("reset sca filters");
+        scaProperties.setFilterSeverity(Collections.emptyList());
+        resetThresholds();
     }
 
-    @After()
-    public void afterEachScenario() {
+    @After
+    public void afterEachScenario() throws IOException {
         log.info("Cleaning JIRA project: {}", jiraProperties.getProject());
         jiraUtils.cleanProject(jiraProperties.getProject());
+
+        if (directoryToScan != null) {
+            log.info("Deleting temp directory: {}", directoryToScan);
+            PathUtils.deleteDirectory(directoryToScan);
+        }
     }
 
-    @Given("repository is github-sca")
-    public void setRepo() {
-        commandlineConstantArgs = GITHUB_REPO_ARGS;
+    @Given("source directory contains vulnerable files")
+    public void sourceDirectoryContainsVulnerableFiles() throws IOException {
+        directoryToScan = getTempDir();
+        copyTestProjectTo(directoryToScan);
     }
 
-    @When("running with break-build on {word}")
-    public void runningWithBreakBuild(String issueType) {
+    @Given("code has 6 High, 11 Medium and 1 low issues")
+    public void setProject() {
+        customScaProjectName = "test";
+    }
+
+    @When("running a SCA scan with {} input")
+    public void runningWithBreakBuild(String input) {
         StringBuilder commandBuilder = new StringBuilder();
-
-        switch (issueType) {
+        setFilters("High");
+        switch (input) {
             case "success":
-                commandBuilder.append("--scan  --severity=High --app=MyApp --cx-project=test").append(commandlineConstantArgs);
+                commandBuilder.append("--scan  --severity=High --app=MyApp --cx-project=test").append(GITHUB_REPO_ARGS);
+                scaProperties.setThresholdsScore(10.0);
+                break;
+            case "break-build":
+                commandBuilder.append("--scan  --severity=High --app=MyApp --cx-project=test").append(GITHUB_REPO_ARGS);
+                scaProperties.setThresholdsScore(1.0);
                 break;
             case "missing-mandatory-parameter":
-                commandBuilder.append("--severity=High --severity=Medium").append(commandlineConstantArgs);
+                commandBuilder.append(GITHUB_REPO_ARGS);
                 break;
             case "error-processing-request":
-                commandBuilder.append("--scan  --severity=High --app=MyApp").append(commandlineConstantArgs);
+                commandBuilder.append("--scan --app=MyApp").append(GITHUB_REPO_ARGS);
                 break;
             case "missing-project":
-                commandBuilder.append("--scan  --severity=High --app=MyApp --f=nofile").append(REPO_ARGS);
+                commandBuilder.append("--scan --app=MyApp --f=nofile").append(REPO_ARGS);
                 break;
             default:
-                throw new PendingException("Issues type " + issueType + " isn't supported");
+                throw new PendingException("Issues type " + input + " isn't supported");
         }
 
         log.info("Running CxFlow scan with command line: {}", commandBuilder.toString());
         Throwable exception = null;
         try {
-            TestUtils.runCxFlow(testContext.getCxFlowRunner(), commandBuilder.toString());
+            TestUtils.runCxFlow(cxFlowRunner, commandBuilder.toString());
         } catch (Throwable e) {
             exception = e;
         }
-        testContext.setCxFlowExecutionException(exception);
+        cxFlowExecutionException = exception;
     }
 
-    @Then("run should exit with exit code {int}")
+    @Then("run should exit with exit code {}")
     public void validateExitCode(int expectedExitCode) {
-        Throwable exception = testContext.getCxFlowExecutionException();
+        Assert.assertNotNull("Expected an exception to be thrown.", cxFlowExecutionException);
+        Assert.assertEquals(InvocationTargetException.class, cxFlowExecutionException.getClass());
 
-        Assert.assertNotNull("Expected an exception to be thrown.", exception);
-        Assert.assertEquals(InvocationTargetException.class, exception.getClass());
-
-        Throwable targetException = ((InvocationTargetException) exception).getTargetException();
+        Throwable targetException = ((InvocationTargetException) cxFlowExecutionException).getTargetException();
         Assert.assertTrue(targetException instanceof ExitThrowable);
 
         int actualExitCode = ((ExitThrowable) targetException).getExitCode();
 
-        Assert.assertEquals("The expected exist code did not match",
-                expectedExitCode, actualExitCode);
+        Assert.assertEquals("The expected exit code did not match", expectedExitCode, actualExitCode);
     }
 
-    @Given("code has x High, y Medium and z low issues")
-    public void setIssues() {
-        expectedHigh = 6;
-        expectedMedium = 9;
-        expectedLow = 0;
+    @Given("last scan for a project {string} contains 50 High, 3 Medium and 1 Low-severity findings")
+    public void setProjectWithFindings(String projectName){
+        customScaProjectName = projectName;
     }
 
     @When("running sca scan {word}")
-    public void runnningScanWithFilter(String filter) {
-        StringBuilder commandBuilder = new StringBuilder();
+    public void runnningScanWithFilter(String filters) {
+        setFilters(filters);
+        tryRunCxFlow(" --scan --app=MyApp --cx-project=test" + GITHUB_REPO_ARGS);
+    }
 
-        switch (filter) {
-            case "no-filter":
-                commandBuilder.append(" --scan  --scanner=sca --app=MyApp --cx-project=test").append(commandlineConstantArgs);
-                break;
-            // case "filter-High-and-Medium":
-            //     commandBuilder.append(" --scan  --scanner=sca --app=MyApp --cx-project=test").append(commandlineConstantArgs);
-            //     break;
-            // case "filter-only-Medium":
-            //     commandBuilder.append(" --scan  --scanner=sca --app=MyApp --cx-project=test").append(commandlineConstantArgs);
-            //     break;
-            default:
-                throw new PendingException("Filter " + filter + " isn't supported");
-        }
+    @Then("bug tracker contains {} issues")
+    public void validateBugTrackerIssues(String description) {
+        int expectedIssueCount = getExpectedIssueCount(description);
+        int actualIssueCount = jiraUtils.getNumberOfIssuesInProject(jiraProperties.getProject());
 
-        try {
-            TestUtils.runCxFlow(testContext.getCxFlowRunner(), commandBuilder.toString());
-        } catch (Throwable e) {
+        log.info("comparing expected number of issues: {}, to actual bug tracker issues; {}", expectedIssueCount, actualIssueCount);
+        if (expectedIssueCount == AT_LEAST_ONE) {
+            Assert.assertTrue("Expected at least one issue in bug tracker.", actualIssueCount > 0);
+        } else {
+            Assert.assertEquals("Wrong issue count in bug tracker.", expectedIssueCount, actualIssueCount);
         }
     }
 
-    @Then("bugTracker contains {word} issues")
-    public void validateBugTrackerIssues(String numberOfIssues) {
-        int expectedIssuesNumber;
-
-        switch (numberOfIssues) {
-            case "x+y+z":
-                expectedIssuesNumber = expectedHigh + expectedMedium + expectedLow;
+    @And("last scan for the project contains {} findings")
+    public void lastScanForProjectContainsFindings(int findingCount) {
+        switch (findingCount) {
+            case 0:
+                customScaProjectName = "ci-2-to-0-findings-test";
                 break;
-            case "x+y":
-                expectedIssuesNumber = expectedHigh + expectedMedium;
+            case 12:
+                customScaProjectName = "cxflowtestuser-testsManual-master";
                 break;
-            case "y":
-                expectedIssuesNumber = expectedMedium;
+            case 5:
+                customScaProjectName = "ci-2-to-5-findings-test";
                 break;
-
             default:
-                throw new PendingException("Number of issues parameter " + numberOfIssues + " isn't supported");
+                throw new IllegalArgumentException(String.format("The %d finding count is not supported.", findingCount));
         }
+    }
 
-        int actualOfJiraIssues = jiraUtils.getNumberOfIssuesInProject(jiraProperties.getProject());
-        Assert.assertEquals(expectedIssuesNumber, actualOfJiraIssues);
+    @Given("previous scan for a SCA project contains {int} findings")
+    public void previousScanForASCAProjectContainsFindings(int count) {
+        log.info("Assuming finding count: {} for the previous scan.", count);
+    }
+
+    @When("running CxFlow with `publish latest scan results` options")
+    public void runCxFlowWithPublishLatestScanResultsOptions() {
+        String commandLine = String.format("--project --cx-project=%s --app=MyApp --blocksysexit", customScaProjectName);
+        tryRunCxFlow(commandLine);
+    }
+
+    @When("run CxFlow with `publish latest scan results` options and {}")
+    public void runCxFlowGetLatestProjectResultsWithFilters(String filters){
+        setFilters(filters);
+        runCxFlowWithPublishLatestScanResultsOptions();
+    }
+
+    private void setFilters(String filters){
+        String[] filtersList = filters.split(",");
+        if (!filters.equals(NO_FILTERS)){
+            scaProperties.setFilterSeverity(Arrays.asList(filtersList));
+        }
+        else {
+            scaProperties.setFilterSeverity(Collections.emptyList());
+        }
+    }
+
+    @When("running CxFlow with `scan local sources` options")
+    public void runningCxFlowWithScanLocalSourcesOptions() {
+        customScaProjectName = "ci-local-scan-test";
+
+        String commandLine = String.format("--scan --cx-project=%s --app=MyApp --f=%s --blocksysexit",
+                customScaProjectName,
+                directoryToScan);
+
+        tryRunCxFlow(commandLine);
+    }
+
+    @Given("the {string} project doesn't exist in SCA")
+    public void theProjectDoesnTExistInSCA(String projectName) {
+        log.info("Assuming the '{}' project doesn't exist in SCA", projectName);
+        customScaProjectName = projectName;
+    }
+
+    @Given("the {string} project exists in SCA but doesn't have any scans")
+    public void theProjectExistsInSCAButDoesnTHaveAnyScans(String projectName) {
+        log.info("Assuming the '{}' project has no scans", projectName);
+        customScaProjectName = projectName;
+    }
+
+    @And("no exception is thrown")
+    public void noExceptionIsThrown() {
+        Assert.assertNull("Unexpected exception while running CxFlow", cxFlowExecutionException);
+    }
+
+    private void tryRunCxFlow(String commandLine) {
+        try {
+            TestUtils.runCxFlow(cxFlowRunner, commandLine);
+        } catch (Throwable e) {
+            log.info("Caught CxFlow execution exception: {}.", e.getClass().getSimpleName());
+        }
     }
 
     private void initJiraBugTracker() throws IOException {
@@ -176,9 +259,37 @@ public class ScaCliSteps {
         jiraUtils.cleanProject(jiraProperties.getProject());
     }
 
-    protected void initSCAConfig() {
-        scaProperties.setAppUrl("https://sca.scacheckmarx.com");
-        scaProperties.setApiUrl("https://api.scacheckmarx.com");
-        scaProperties.setAccessControlUrl("https://platform.checkmarx.net");
+    private int getExpectedIssueCount(String countDescription) {
+        int result;
+        switch (countDescription) {
+            case "some":
+                result = AT_LEAST_ONE;
+                break;
+            case "no":
+                result = 0;
+                break;
+            default:
+                result = Integer.parseInt(countDescription);
+        }
+
+        return result;
+    }
+
+    private static Path getTempDir() {
+        String systemTempDir = FileUtils.getTempDirectoryPath();
+        String subdir = String.format("sca-cli-test-%s", UUID.randomUUID());
+        return Paths.get(systemTempDir, subdir);
+    }
+
+    private void copyTestProjectTo(Path targetDir) throws IOException {
+        log.info("Copying test project files from resources ({}) into a temp directory: {}", DIRECTORY_TO_SCAN, targetDir);
+        File directory = TestUtils.getFileFromResource(DIRECTORY_TO_SCAN);
+        FileUtils.copyDirectory(directory, targetDir.toFile());
+    }
+
+    private void resetThresholds() {
+        flowProperties.setThresholds(null);
+        scaProperties.setThresholdsSeverity(null);
+        scaProperties.setThresholdsScore(null);
     }
 }

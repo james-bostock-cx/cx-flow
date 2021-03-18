@@ -6,15 +6,17 @@ import com.checkmarx.flow.config.*;
 import com.checkmarx.flow.cucumber.common.utils.TestUtils;
 import com.checkmarx.flow.cucumber.component.scan.ScanFixture;
 import com.checkmarx.flow.service.*;
+import com.checkmarx.sdk.config.CxGoProperties;
 import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
 import com.checkmarx.test.flow.config.CxFlowMocksConfig;
 import io.cucumber.java.en.Given;
 import io.cucumber.java.en.Then;
 import io.cucumber.java.en.When;
 import lombok.RequiredArgsConstructor;
+import org.springframework.boot.info.BuildProperties;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 
@@ -31,6 +33,7 @@ import static org.mockito.Mockito.when;
 public class BatchComponentSteps {
     private final FlowProperties flowProperties;
     private final CxProperties cxProperties;
+    private final CxGoProperties cxgoProperties;
     private final JiraProperties jiraProperties;
     private final GitHubProperties gitHubProperties;
     private final GitLabProperties gitLabProperties;
@@ -43,6 +46,8 @@ public class BatchComponentSteps {
     private final OsaScannerService osaScannerService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ThresholdValidator thresholdValidator;
+    private final BuildProperties buildProperties;
 
     private CxFlowRunner cxFlowRunner;
     private String projectName;
@@ -57,8 +62,11 @@ public class BatchComponentSteps {
         FilterConfiguration filter = FilterConfiguration.fromSimpleFilters(ScanFixture.getScanFilters());
         when(cxClient.getReportContentByScanId(ScanFixture.SCAN_ID, filter))
                 .thenReturn(ScanFixture.getScanResults());
+
+        CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, null, null );
+        
         cxFlowRunner = new CxFlowRunner(flowProperties,
-                cxProperties,
+                cxScannerService,
                 jiraProperties,
                 gitHubProperties,
                 gitLabProperties,
@@ -69,7 +77,9 @@ public class BatchComponentSteps {
                 osaScannerService,
                 filterFactory,
                 configOverrider,
-                scanners);
+                buildProperties,
+                scanners,
+                thresholdValidator);
     }
 
     @Given("project is provided: {string} and team: {string}")

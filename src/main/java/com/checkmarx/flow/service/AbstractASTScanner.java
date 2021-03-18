@@ -1,60 +1,51 @@
 package com.checkmarx.flow.service;
 
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.OperationResult;
 import com.checkmarx.flow.dto.OperationStatus;
 import com.checkmarx.flow.dto.ScanRequest;
+import com.checkmarx.flow.dto.report.AnalyticsReport;
 import com.checkmarx.flow.dto.report.ScanReport;
 import com.checkmarx.flow.exception.ExitThrowable;
 import com.checkmarx.flow.exception.MachinaRuntimeException;
-import com.checkmarx.flow.utils.ZipUtils;
+import com.checkmarx.sdk.dto.AstScaResults;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.ast.ASTResults;
-import com.checkmarx.sdk.dto.ast.ASTResultsWrapper;
-import com.checkmarx.sdk.dto.ast.SCAResults;
 import com.checkmarx.sdk.dto.ast.ScanParams;
-import com.checkmarx.sdk.service.AstClient;
+import com.checkmarx.sdk.dto.sca.SCAResults;
+import com.checkmarx.sdk.service.scanner.AbstractScanner;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-
 
 import java.io.File;
 import java.net.MalformedURLException;
 import java.net.URL;
-import java.nio.file.FileSystems;
-import java.nio.file.Files;
-import java.nio.file.Paths;
 import java.util.List;
-import java.util.UUID;
-
 
 @Slf4j
-public abstract class AbstractASTScanner  implements VulnerabilityScanner{
-    
-    private String scanType ;
-    private com.checkmarx.sdk.service.AstClient client;
-    private FlowProperties flowProperties;
-    
-    public AbstractASTScanner() {
-    }
+@RequiredArgsConstructor
+public abstract class AbstractASTScanner implements VulnerabilityScanner {
+    private final AbstractScanner client;
+    private final FlowProperties flowProperties;
+    private final String scanType;
+    private final BugTrackerEventTrigger bugTrackerEventTrigger;
 
-    public AbstractASTScanner(AstClient astClient, FlowProperties flowProperties, String scanType) {
-        this.client = astClient;
-        this.flowProperties = flowProperties;
-        this.scanType = scanType;
-    }
-
+    @Override
     public ScanResults scan(ScanRequest scanRequest) {
         ScanResults result = null;
         log.info("--------------------- Initiating new {} scan ---------------------", scanType);
-        ScanParams internalScaParams = toParams(scanRequest);
-        ASTResultsWrapper internalResults = new ASTResultsWrapper(new SCAResults(), new ASTResults());
+        ScanParams sdkScanParams = toSdkScanParams(scanRequest);
+        AstScaResults internalResults = new AstScaResults(new SCAResults(), new ASTResults());
         try {
-            internalResults = client.scanRemoteRepo(internalScaParams);
-            logRequest(scanRequest, getScanId(internalResults),  OperationResult.successful());
+            bugTrackerEventTrigger.triggerScanStartedEvent(scanRequest);
+            internalResults = client.scan(sdkScanParams);
+            logRequest(scanRequest, internalResults, OperationResult.successful());
             result = toScanResults(internalResults);
         } catch (Exception e) {
-             treatError(scanRequest, internalResults, e);
+            treatError(scanRequest, internalResults, e);
         }
+        
         return result;
     }
 
@@ -72,7 +63,7 @@ public abstract class AbstractASTScanner  implements VulnerabilityScanner{
                 case "cxParse":
                 case "cxBatch":
                 default:
-                    log.warn("ScaScanner does not support scanType of {}, ignoring.");
+                    log.warn("ScaScanner does not support scanType of {}, ignoring.", scanType);
                     break;
             }
         } catch (MachinaRuntimeException me) {
@@ -85,66 +76,83 @@ public abstract class AbstractASTScanner  implements VulnerabilityScanner{
         return scanResults;
     }
 
-    private void treatError(ScanRequest scanRequest, ASTResultsWrapper internalResults, Exception e) {
+    @Override
+    public ScanResults getLatestScanResults(ScanRequest request) {
+        ScanParams sdkScanParams = ScanParams.builder()
+                .projectName(request.getProject())
+                .scaConfig(request.getScaConfig())
+                .filterConfiguration(request.getFilter())
+                .build();
+        AstScaResults internalResults = client.getLatestScanResults(sdkScanParams);
+        return toScanResults(internalResults);
+    }
+
+    protected abstract void setScannerSpecificProperties(ScanRequest scanRequest, ScanParams scanParams);
+
+    private void treatError(ScanRequest scanRequest, AstScaResults internalResults, Exception e) {
         final String message = scanType + " scan failed.";
         log.error(message, e);
         OperationResult scanCreationFailure = new OperationResult(OperationStatus.FAILURE, e.getMessage());
-        logRequest(scanRequest, getScanId(internalResults),  scanCreationFailure);
+        logRequest(scanRequest, internalResults, scanCreationFailure);
         throw new MachinaRuntimeException(message + "\n" + e.getMessage());
     }
 
     public ScanResults scan(ScanRequest scanRequest, String path) throws ExitThrowable {
+        BugTracker.Type bugTrackerType = bugTrackerEventTrigger.triggerScanStartedEvent(scanRequest);
         ScanResults result = null;
-        log.info("--------------------- Initiating new {} scan ---------------------", scanType);
-        ASTResultsWrapper internalResults = new ASTResultsWrapper(new SCAResults(), new ASTResults());
-
-        try {
-            String cxZipFile = FileSystems.getDefault().getPath("cx.".concat(UUID.randomUUID().toString()).concat(".zip")).toAbsolutePath().toString();
-            ZipUtils.zipFile(path, cxZipFile, flowProperties.getZipExclude());
-            File f = new File(cxZipFile);
-            log.debug("Creating temp file {}", f.getPath());
-            log.debug("free space {}", f.getFreeSpace());
-            log.debug("total space {}", f.getTotalSpace());
-            log.debug(f.getAbsolutePath());
-            ScanParams internalScaParams = toParams(scanRequest, cxZipFile);
-
-            internalResults = client.scanLocalSource(internalScaParams);
-            logRequest(scanRequest, getScanId(internalResults),  OperationResult.successful());
-            result = toScanResults(internalResults);
-
-            log.debug("Deleting temp file {}", f.getPath());
-            Files.deleteIfExists(Paths.get(cxZipFile));
-
-        } catch (Exception e) {
-             treatError(scanRequest, internalResults, e);
+        if (bugTrackerType.equals(BugTracker.Type.NONE)) {
+            log.info("Not waiting for scan completion as Bug Tracker type is NONE");
+            ScanParams sdkScanParams = toSdkScanParams(scanRequest, path);
+            client.scanWithNoWaitingToResults(sdkScanParams);
+        } else {
+            result = actualScan(scanRequest, path);
         }
         return result;
     }
 
-    protected abstract String getScanId(ASTResultsWrapper internalResults) ;
+    private ScanResults actualScan(ScanRequest scanRequest, String path) {
+        ScanResults result = null;
+        log.info("--------------------- Initiating new {} scan ---------------------", scanType);
+        AstScaResults internalResults = new AstScaResults(new SCAResults(), new ASTResults());            
+        try {
+            ScanParams sdkScanParams = toSdkScanParams(scanRequest, path);
+            internalResults = client.scan(sdkScanParams);
+            logRequest(scanRequest, internalResults, OperationResult.successful());
+            result = toScanResults(internalResults);
+        } catch (Exception e) {
+            treatError(scanRequest, internalResults, e);
+        }
+        return result;
+    }
 
-    private ScanParams toParams(ScanRequest scanRequest, String zipPath) {
+    protected abstract String getScanId(AstScaResults internalResults);
+
+    private ScanParams toSdkScanParams(ScanRequest scanRequest, String pathToScan) {
         return ScanParams.builder()
                 .projectName(scanRequest.getProject())
-                .zipPath(zipPath)
+                .sourceDir(pathToScan)
+                .scaConfig(scanRequest.getScaConfig())
+                .filterConfiguration(scanRequest.getFilter())
                 .build();
     }
-    
-    protected abstract ScanResults toScanResults(ASTResultsWrapper internalResults);
+
+    protected abstract ScanResults toScanResults(AstScaResults internalResults);
 
 
-    protected ScanParams toParams(ScanRequest scanRequest) {
+    private ScanParams toSdkScanParams(ScanRequest scanRequest) {
         URL parsedUrl = getRepoUrl(scanRequest);
 
-        return ScanParams.builder()
+        ScanParams scanParams = ScanParams.builder()
+                .branch(scanRequest.getBranch())
                 .projectName(scanRequest.getProject())
                 .remoteRepoUrl(parsedUrl)
                 .scaConfig(scanRequest.getScaConfig())
+                .filterConfiguration(scanRequest.getFilter())
                 .build();
+
+        setScannerSpecificProperties(scanRequest, scanParams);
+        return scanParams;
     }
-
-
-
 
     private URL getRepoUrl(ScanRequest scanRequest) {
         URL parsedUrl;
@@ -156,22 +164,20 @@ public abstract class AbstractASTScanner  implements VulnerabilityScanner{
         }
         return parsedUrl;
     }
-    
+
     @Override
     public boolean isEnabled() {
         List<String> enabledScanners = flowProperties.getEnabledVulnerabilityScanners();
-        
-        return enabledScanners != null 
+
+        return enabledScanners != null
                 && enabledScanners.stream().anyMatch(scanner -> scanner.equalsIgnoreCase(scanType));
- 
+
     }
-    
-    private void logRequest(ScanRequest request, String scanId, OperationResult scanCreationResult) {
-        ScanReport report = new ScanReport(scanId, request,request.getRepoUrl(), scanCreationResult, ScanReport.SCA);
+
+    private void logRequest(ScanRequest request, AstScaResults internalResults, OperationResult scanCreationResult) {
+        String scanId = getScanId(internalResults);
+        ScanReport report = new ScanReport(scanId, request, request.getRepoUrl(), scanCreationResult, AnalyticsReport.SCA);
         report.log();
     }
-
-
-
-   
 }
+

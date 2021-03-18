@@ -1,15 +1,12 @@
 package com.checkmarx.flow.utils;
 
 import com.checkmarx.flow.config.FlowProperties;
-import com.checkmarx.flow.config.JiraProperties;
+import com.checkmarx.flow.config.CxIntegrationsProperties;
 import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.ScanRequest;
-import com.checkmarx.flow.service.ConfigurationOverrider;
-import com.checkmarx.flow.service.SCAScanner;
-import com.checkmarx.flow.service.SastScanner;
+import com.checkmarx.flow.service.*;
 import com.checkmarx.sdk.config.Constants;
-import com.checkmarx.sdk.config.ScaProperties;
-import com.checkmarx.sdk.dto.CxConfig;
+import com.checkmarx.sdk.dto.sast.CxConfig;
 import com.checkmarx.sdk.utils.ScanUtils;
 import org.junit.Before;
 import org.junit.Test;
@@ -29,19 +26,34 @@ public class ScanUtilsTest {
     @Autowired
     private SastScanner sastScanner;
 
+    @Autowired
+    private CxGoScanner cxgoScanner;
+
+    @Autowired
+    private ScaConfigurationOverrider scaConfigOverrider;
+
+    @Autowired
+    private CxIntegrationsProperties cxIntegrationsProperties;
+
+    @Autowired
+    private ReposManagerService reposManagerService;
+
+    @Autowired
+    private GitAuthUrlGenerator gitAuthUrlGenerator;
+
+
     private FlowProperties flowProperties;
-    private JiraProperties jiraProperties;
-    private ScaProperties scaProperties;
     private ConfigurationOverrider configOverrider;
+    private GitHubService gitHubService;
 
     @Before
     public void setup(){
         flowProperties = new FlowProperties();
         flowProperties.setBugTrackerImpl(Arrays.asList("JIRA","GitHub","GitLab"));
-        scaProperties = new ScaProperties();
 
-        jiraProperties = new JiraProperties();
-        configOverrider = new ConfigurationOverrider(flowProperties, scaProperties, scaScanner, sastScanner);
+        configOverrider = new ConfigurationOverrider(flowProperties, cxIntegrationsProperties,
+                scaScanner, sastScanner, cxgoScanner,
+                scaConfigOverrider, reposManagerService, gitAuthUrlGenerator);
     }
     @Test
     public void testCxConfigOverride(){
@@ -104,8 +116,8 @@ public class ScanUtilsTest {
         assertEquals("test app", request.getApplication());
         assertEquals(2, request.getActiveBranches().size());
         assertNotNull(request.getFilter());
-        assertNotNull(request.getFilter().getSimpleFilters());
-        assertFalse(request.getFilter().getSimpleFilters().isEmpty());
+        assertNotNull(request.getFilter().getSastFilters().getSimpleFilters());
+        assertFalse(request.getFilter().getSastFilters().getSimpleFilters().isEmpty());
     }
 
     @Test

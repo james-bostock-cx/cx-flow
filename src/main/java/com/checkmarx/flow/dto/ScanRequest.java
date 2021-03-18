@@ -1,15 +1,13 @@
 package com.checkmarx.flow.dto;
 
 import com.checkmarx.flow.config.FindingSeverity;
+import com.checkmarx.flow.config.external.ASTConfig;
 import com.checkmarx.flow.service.VulnerabilityScanner;
 import com.checkmarx.sdk.config.ScaConfig;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
 import lombok.*;
 
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 /**
  * Object containing all applicable information about the scan request details
@@ -46,8 +44,15 @@ public class ScanRequest {
     private String refs;
     private List<String> email;
     private boolean forceScan;
-    private boolean incremental;
+    private Boolean incremental;
     private String scanPreset;
+
+    /**
+     * Getting populated from the ControllerRequest.
+     * Indicates whether we got a scm-instance parameter from a webhook event.
+     * In case not null it will override the configuration default scm credentials
+     */
+    private String scmInstance;
 
     /**
      * Indicates whether scan preset has been overridden.
@@ -73,6 +78,21 @@ public class ScanRequest {
     private Map<String, String> additionalMetadata;
     private List<VulnerabilityScanner> vulnerabilityScanners;
     private ScaConfig scaConfig;
+    private ASTConfig astConfig;
+
+    @Getter @Setter
+    private String scannerApiSec;
+
+    /**
+     * 'Organization' here means the top-most level of project hierarchy.
+     * E.g. if SCM supports several levels of hierarchy, path to the project may look like org1/suborg/my-project.
+     * In such case the value of organizationId should be 'org1'.
+     */
+    @Getter @Setter
+    private String organizationId;
+
+    @Getter @Setter
+    private String gitUrl;
 
     public ScanRequest(ScanRequest other) {
         this.namespace = other.namespace;
@@ -108,7 +128,11 @@ public class ScanRequest {
         this.forceScan = other.forceScan;
         this.vulnerabilityScanners = other.vulnerabilityScanners;
         this.scaConfig = other.scaConfig;
+        this.astConfig = other.astConfig;
         this.thresholds = other.thresholds;
+        this.scannerApiSec = other.scannerApiSec;
+        this.organizationId = other.organizationId;
+        this.gitUrl = other.gitUrl;
     }
 
     public Map<String,String> getAltFields() {
@@ -149,19 +173,25 @@ public class ScanRequest {
         return "ScanRequest(namespace=" + this.getNamespace() + ", application=" + this.getApplication() + ", org=" + this.getOrg() + ", team=" + this.getTeam() + ", project=" + this.getProject() + ", cxFields=" + this.getCxFields() + ", site=" + this.getSite() + ", repoUrl=" + this.getRepoUrl() + ", repoName=" + this.getRepoName() + ", branch=" + this.getBranch() + ", mergeTargetBranch=" + this.getMergeTargetBranch() + ", mergeNoteUri=" + this.getMergeNoteUri() + ", repoProjectId=" + this.getRepoProjectId() + ", refs=" + this.getRefs() + ", email=" + this.getEmail() + ", incremental=" + this.isIncremental() + ", scanPreset=" + this.getScanPreset() + ", excludeFiles=" + this.getExcludeFiles() + ", excludeFolders=" + this.getExcludeFolders() + ", repoType=" + this.getRepoType() + ", product=" + this.getProduct() + ", bugTracker=" + this.getBugTracker() + ", type=" + this.getType() + ", activeBranches=" + this.getActiveBranches() + ", filter=" + this.getFilter() + ")";
     }
 
+    public Boolean isIncremental() {
+        return Optional.ofNullable(incremental).orElse(Boolean.FALSE);
+    }
+    public Boolean getIncrementalField() {
+        return incremental;
+    }
+    
     public enum Product {
         CX("CX"),
-        CXOSA("CXOSA"),
-        FORTIFY("FORTIFY");
+        CXOSA("CXOSA");
 
-        private String product;
+        private final String value;
 
-        Product(String product) {
-            this.product = product;
+        Product(String value) {
+            this.value = value;
         }
 
         public String getProduct() {
-            return product;
+            return value;
         }
     }
 
@@ -170,14 +200,14 @@ public class ScanRequest {
         DAST("DAST"),
         IAST("IAST");
 
-        private String type;
+        private final String value;
 
-        Type(String type) {
-            this.type = type;
+        Type(String value) {
+            this.value = value;
         }
 
         public String getType() {
-            return type;
+            return value;
         }
     }
 
@@ -189,14 +219,14 @@ public class ScanRequest {
         ADO("ADO"),
         NA("NA");
 
-        private String repository;
+        private final String value;
 
-        Repository(String repository) {
-            this.repository = repository;
+        Repository(String value) {
+            this.value = value;
         }
 
         public String getRepository() {
-            return repository;
+            return value;
         }
     }
 }

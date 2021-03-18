@@ -4,7 +4,8 @@ import com.checkmarx.flow.CxFlowApplication;
 import com.checkmarx.flow.config.ADOProperties;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitHubProperties;
-import com.checkmarx.flow.controller.GitHubController;
+import com.checkmarx.flow.config.ScmConfigOverrider;
+import com.checkmarx.flow.controller.*;
 import com.checkmarx.flow.cucumber.integration.azure.publishing.AzureDevopsClient;
 import com.checkmarx.flow.cucumber.integration.azure.publishing.githubflow.ScanResultsBuilder;
 import com.checkmarx.flow.dto.ControllerRequest;
@@ -15,9 +16,13 @@ import com.checkmarx.flow.service.*;
 import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.ScanResults;
+import com.checkmarx.sdk.dto.ast.ASTResults;
+import com.checkmarx.sdk.dto.ast.report.AstSummaryResults;
 import com.checkmarx.sdk.dto.cx.CxScanSummary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.CxService;
+import com.checkmarx.sdk.dto.ast.report.Finding;
+import com.checkmarx.sdk.dto.ast.report.FindingNode;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.cucumber.java.Before;
@@ -49,9 +54,15 @@ import static org.mockito.Mockito.*;
 public class Github2AdoSteps {
     public static final String GITHUB_USER = "cxflowtestuser";
     public static final String AZURE = "Azure";
+    private static final String AST = "AST";
+    private static final String WEB_REPORT_LINK = "http://fake.co.il";
+    private static final String SAST = "SAST";
+    private static final String TO_VERIFY = "TO_VERIFY";
+    private static final String DESCRIPTION_AST = "Description AST";
 
-    private final CxClient cxClientMock;
+    private final CxService cxClientMock;
     private final GitHubService gitHubService;
+    private final GitHubAppAuthService gitHubAppAuthService;
     private final ADOProperties adoProperties;
     private IssueService issueService;
     private GitHubController gitHubControllerSpy;
@@ -60,10 +71,13 @@ public class Github2AdoSteps {
     private FlowProperties flowProperties;
     private final CxProperties cxProperties;
     private final GitHubProperties gitHubProperties;
-    private final HelperService helperService;
+    private HelperService helperService = mock(HelperService.class);
     private final EmailService emailService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
+    private final CodeBashingService codeBashingService;
 
     private ScanResults scanResultsToInject;
     
@@ -79,25 +93,32 @@ public class Github2AdoSteps {
     @Autowired
     private ApplicationContext applicationContext;
     
-    public Github2AdoSteps(FlowProperties flowProperties, GitHubService gitHubService,
-                           CxProperties cxProperties, GitHubProperties gitHubProperties,
-                           ConfigurationOverrider configOverrider, FlowService flowService, ADOProperties adoProperties, FilterFactory filterFactory, AzureDevopsClient azureDevopsClient, EmailService emailService) {
-        this.filterFactory = filterFactory;
+    private String scannerType;
 
-        this.cxClientMock = mock(CxClient.class);
+    public Github2AdoSteps(FlowProperties flowProperties, GitHubService gitHubService,
+                           GitHubAppAuthService gitHubAppAuthService, CxProperties cxProperties,
+                           GitHubProperties gitHubProperties, ConfigurationOverrider configOverrider,
+                           FlowService flowService, ADOProperties adoProperties,
+                           FilterFactory filterFactory, AzureDevopsClient azureDevopsClient,
+                           EmailService emailService, ScmConfigOverrider scmConfigOverrider,
+                           GitAuthUrlGenerator gitAuthUrlGenerator,
+                           CodeBashingService codeBashingService) {
+        this.filterFactory = filterFactory;
+        this.cxClientMock = mock(CxService.class);
 
         this.flowProperties = flowProperties;
-
         this.cxProperties = cxProperties;
-
-        this.helperService = mock(HelperService.class);
         this.flowService = flowService;
         this.gitHubService = gitHubService;
+        this.gitHubAppAuthService = gitHubAppAuthService;
         this.azureDevopsClient = azureDevopsClient;
         this.gitHubProperties = gitHubProperties;
         this.adoProperties = adoProperties;
         this.configOverrider = configOverrider;
         this.emailService = emailService;
+        this.scmConfigOverrider = scmConfigOverrider;
+        this.gitAuthUrlGenerator = gitAuthUrlGenerator;
+        this.codeBashingService = codeBashingService;
         initGitHubProperties();
     }
 
@@ -115,9 +136,10 @@ public class Github2AdoSteps {
         this.flowProperties.setBugTracker(AZURE);
         this.flowProperties.setBugTrackerImpl(Collections.singletonList(AZURE));
         this.adoProperties.setUrl("https://dev.azure.com/");
-        issueService = new IssueService(flowProperties);
+        
+        issueService = new IssueService(flowProperties, codeBashingService);
         issueService.setApplicationContext(applicationContext);
-        scanResultsToInject = createFakeResults();
+       
         initCxClientMock();
         initServices();
         initHelperServiceMock();
@@ -170,6 +192,7 @@ public class Github2AdoSteps {
         Pusher pusher = new Pusher();
         pusher.setEmail("some@email");
         pushEvent.setPusher(pusher);
+        pushEvent.setRef("refs/heads/master");
 
 
         try {
@@ -197,13 +220,20 @@ public class Github2AdoSteps {
             assertTrue(azureDevopsClient.projectExists());
             assertEquals(2, azureDevopsClient.getIssues().size());
             
-            azureDevopsClient.deleteProjectIssues();
-            
         } catch (IOException e) {
             fail(e.getMessage());
         }
     }
-    
+
+    @And("Additional fields are populated")
+    public void validateAdditionalFields() throws IOException {
+        azureDevopsClient.getIssues().forEach(issue -> {
+            Assert.assertTrue(issue.getBody().contains(DESCRIPTION_AST));
+        });
+
+        azureDevopsClient.deleteProjectIssues();
+    }
+
     @And("project {string} exists in Azure under namespace {string}")
     public void validateProjectName(String project, String namespace) {
 
@@ -263,7 +293,7 @@ public class Github2AdoSteps {
     }
 
     private void initMockGitHubController() {
-        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any());
+        doNothing().when(gitHubControllerSpy).verifyHmacSignature(any(), any(), any());
     }
     
     private void initServices() {
@@ -273,14 +303,15 @@ public class Github2AdoSteps {
         //And thus it will work with real gitHubService
         this.gitHubControllerSpy = spy(new GitHubController(gitHubProperties,
                 flowProperties,
-                cxProperties,
                 null,
                 flowService,
                 helperService,
                 gitHubService,
-                null,
+                gitHubAppAuthService,
                 filterFactory,
-                configOverrider));
+                configOverrider,
+                scmConfigOverrider,
+                gitAuthUrlGenerator));
         
         //results service will be a Mock and will work with gitHubService Mock
         //and will not not connect to any external 
@@ -288,10 +319,11 @@ public class Github2AdoSteps {
     }
 
     private void initResultsServiceMock() {
-        
+
+        CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, cxClientMock, null );
 
         this.resultsService = spy(new ResultsService(
-                cxClientMock,
+                cxScannerService,
                 null,
                 null,
                 issueService,
@@ -299,11 +331,24 @@ public class Github2AdoSteps {
                 null,
                 null,
                 null,
-                emailService,
-                cxProperties,
-                flowProperties));
+                emailService));
     }
 
+    @And("Scanner is AST")
+    public void setScannerAST(){
+        this.scannerType = AST;
+        flowProperties.setEnabledVulnerabilityScanners(Arrays.asList(AST));
+        scanResultsToInject = createFakeResults();
+    }
+
+    @And("Scanner is SAST")
+    public void setScannerSAST(){
+        this.scannerType = SAST;
+        flowProperties.setEnabledVulnerabilityScanners(Arrays.asList(SAST));
+        scanResultsToInject = createFakeResults();
+
+    }
+    
     private ScanResults createFakeResults() {
         ScanResults result = new ScanResults();
         
@@ -312,6 +357,9 @@ public class Github2AdoSteps {
         Map<String, Object> details = new HashMap<>();
         details.put(Constants.SUMMARY_KEY, new HashMap<>());
 
+        if(scannerType.equals(AST)){
+            createAstFindings(result);
+        }
         result.setAdditionalDetails(details);
         
         result.setXIssues(ScanResultsBuilder.get2XIssues());
@@ -319,7 +367,39 @@ public class Github2AdoSteps {
         return result;
     }
 
+    private void createAstFindings(ScanResults result) {
+        result.setAstResults(new ASTResults());
+        result.getAstResults().setScanId("111");
+        result.getAstResults().setWebReportLink(WEB_REPORT_LINK);
+        LinkedList<Finding> findings = new LinkedList();
+        
+        findings.add(createAstFinding(1));
+        findings.add(createAstFinding(2));
+        
+        result.getAstResults().setFindings(findings);
+
+        result.setScanSummary(new CxScanSummary());
+
+        result.getAstResults().setSummary(new AstSummaryResults());
     
+ 
+    }
+
+    private Finding createAstFinding(int index) {
+        Finding f1 = new Finding();
+        f1.setDescription(DESCRIPTION_AST + index);
+        f1.setState(TO_VERIFY);
+        f1.setQueryName("Query Name " + index);
+        f1.setSeverity("HIGH");
+        f1.setCweID(index);
+        f1.setSimilarityID(index);
+        f1.setUniqueID(index);
+        f1.setNodes(Arrays.asList(new FindingNode()));
+        f1.getNodes().get(0).setFileName(index + "file.java");
+        return f1;
+    }
+
+
     /**
      * Returns scan results as if they were produced by SAST.
      */

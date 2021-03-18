@@ -2,10 +2,12 @@ package com.checkmarx.flow.custom;
 
 import com.checkmarx.flow.config.ADOProperties;
 import com.checkmarx.flow.config.FlowProperties;
+import com.checkmarx.flow.config.ScmConfigOverrider;
 import com.checkmarx.flow.dto.Issue;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.azure.CreateWorkItemAttr;
 import com.checkmarx.flow.exception.MachinaException;
+import com.checkmarx.flow.utils.ADOUtils;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
 import com.checkmarx.sdk.config.Constants;
@@ -50,12 +52,15 @@ public class ADOIssueTracker implements IssueTracker {
     private final RestTemplate restTemplate;
     private final ADOProperties properties;
     private final FlowProperties flowProperties;
+    private final ScmConfigOverrider scmConfigOverrider;
 
 
-    public ADOIssueTracker(@Qualifier("flowRestTemplate") RestTemplate restTemplate, ADOProperties properties, FlowProperties flowProperties) {
+    public ADOIssueTracker(@Qualifier("flowRestTemplate") RestTemplate restTemplate, ADOProperties properties, FlowProperties flowProperties,
+                           ScmConfigOverrider scmConfigOverrider) {
         this.restTemplate = restTemplate;
         this.properties = properties;
         this.flowProperties = flowProperties;
+        this.scmConfigOverrider = scmConfigOverrider;
     }
 
     @Override
@@ -151,7 +156,7 @@ public class ADOIssueTracker implements IssueTracker {
         log.debug(wiq);
         JSONObject wiqJson = new JSONObject();
         wiqJson.put("query", wiq);
-        HttpEntity<String> httpEntity = new HttpEntity<>(wiqJson.toString(), createAuthHeaders());
+        HttpEntity<String> httpEntity = new HttpEntity<>(wiqJson.toString(), ADOUtils.createAuthHeaders(scmConfigOverrider.determineConfigToken(properties, request.getScmInstance())));
 
         ResponseEntity<String> response = restTemplate.exchange(endpoint,
                 HttpMethod.POST, httpEntity, String.class);
@@ -165,7 +170,7 @@ public class ADOIssueTracker implements IssueTracker {
         for (int i = 0; i < workItems.length(); i++) {
             JSONObject workItem = workItems.getJSONObject(i);
             String workItemUri = workItem.getString("url");
-            Issue wi = getIssue(workItemUri, issueBody);
+            Issue wi = getIssue(workItemUri, issueBody, request);
             if(wi != null){
                 issues.add(wi);
             }
@@ -173,8 +178,8 @@ public class ADOIssueTracker implements IssueTracker {
         return issues;
     }
 
-    private Issue getIssue(String uri, String issueBody){
-        HttpEntity<Void> httpEntity = new HttpEntity<>(createAuthHeaders());
+    private Issue getIssue(String uri, String issueBody, ScanRequest scanRequest){
+        HttpEntity<Void> httpEntity = new HttpEntity<>(ADOUtils.createAuthHeaders(scmConfigOverrider.determineConfigToken(properties, scanRequest.getScmInstance())));
         log.debug("Getting issue at uri {}", uri);
         ResponseEntity<String> response = restTemplate.exchange(uri, HttpMethod.GET, httpEntity, String.class);
         String r = response.getBody();
@@ -230,7 +235,7 @@ public class ADOIssueTracker implements IssueTracker {
         CreateWorkItemAttr title = new CreateWorkItemAttr();
         title.setOp("add");
         title.setPath(Constants.ADO_FIELD.concat(TITLE_FIELD));
-        title.setValue(getXIssueKey(resultIssue, request));
+        title.setValue(HTMLHelper.getScanRequestIssueKeyWithDefaultProductValue(request, this, resultIssue));
         
         CreateWorkItemAttr description = new CreateWorkItemAttr();
         description.setOp("add");
@@ -253,12 +258,12 @@ public class ADOIssueTracker implements IssueTracker {
         }
 
         log.debug("Request body: {}", body);
-        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, createPatchAuthHeaders());
+        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, ADOUtils.createPatchAuthHeaders(scmConfigOverrider.determineConfigToken(properties, request.getScmInstance())));
 
         ResponseEntity<String> response = restTemplate.exchange(endpoint, HttpMethod.POST, httpEntity, String.class);
         try {
             String url = new JSONObject(response.getBody()).getJSONObject("_links").getJSONObject("self").getString("href");
-            return getIssue(url, issueBody);
+            return getIssue(url, issueBody, request);
         }catch (NullPointerException e){
             log.warn("Error occurred while retrieving new WorkItem url.  Returning null", e);
             return null;
@@ -354,7 +359,7 @@ public class ADOIssueTracker implements IssueTracker {
 
         List<CreateWorkItemAttr> body = new ArrayList<>(Collections.singletonList(state));
 
-        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, createPatchAuthHeaders());
+        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, ADOUtils.createPatchAuthHeaders(scmConfigOverrider.determineConfigToken(properties, request.getScmInstance())));
 
         restTemplate.exchange(endpoint, HttpMethod.PATCH, httpEntity, String.class);
     }
@@ -378,10 +383,10 @@ public class ADOIssueTracker implements IssueTracker {
 
         List<CreateWorkItemAttr> body = new ArrayList<>(Arrays.asList(state, description));
 
-        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, createPatchAuthHeaders());
+        HttpEntity<List<CreateWorkItemAttr>> httpEntity = new HttpEntity<>(body, ADOUtils.createPatchAuthHeaders(scmConfigOverrider.determineConfigToken(properties, request.getScmInstance())));
 
         restTemplate.exchange(endpoint, HttpMethod.PATCH, httpEntity, String.class);
-        return getIssue(issue.getUrl(), issueBody);
+        return getIssue(issue.getUrl(), issueBody, request);
     }
 
     @Override
@@ -400,7 +405,7 @@ public class ADOIssueTracker implements IssueTracker {
             return String.format(ScanUtils.ISSUE_TITLE_KEY, request.getProduct().getProduct(), issue.getVulnerability(), issue.getFilename());
         }
         else {
-            return issue.getScaDetails() == null
+            return ScanUtils.isSAST(issue)
                     ? String.format(ScanUtils.ISSUE_TITLE_KEY_WITH_BRANCH, request.getProduct().getProduct(), issue.getVulnerability(), issue.getFilename(), request.getBranch())
                     : ScanUtils.getScaSummaryIssueKey(request, issue);
         }
@@ -430,18 +435,7 @@ public class ADOIssueTracker implements IssueTracker {
         log.info("Finalizing Azure Processing");
     }
 
-    private HttpHeaders createAuthHeaders(){
-        String encoding = Base64.getEncoder().encodeToString(":".concat(properties.getToken()).getBytes());
-        HttpHeaders httpHeaders = new HttpHeaders();
-        httpHeaders.set("Content-Type", "application/json");
-        httpHeaders.set("Authorization", "Basic ".concat(encoding));
-        httpHeaders.set("Accept", "application/json");
-        return httpHeaders;
-    }
 
-    private HttpHeaders createPatchAuthHeaders(){
-        HttpHeaders httpHeaders = createAuthHeaders();
-        httpHeaders.set("Content-Type", "application/json-patch+json");
-        return httpHeaders;
-    }
+
+
 }

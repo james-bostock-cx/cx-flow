@@ -4,29 +4,34 @@ import com.checkmarx.flow.CxFlowApplication;
 import com.checkmarx.flow.config.FindingSeverity;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.GitHubProperties;
+import com.checkmarx.flow.config.ScmConfigOverrider;
 import com.checkmarx.flow.cucumber.common.JsonLoggerTestUtils;
 import com.checkmarx.flow.dto.BugTracker;
 import com.checkmarx.flow.dto.OperationResult;
 import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.report.PullRequestReport;
 import com.checkmarx.flow.exception.MachinaException;
+import com.checkmarx.flow.service.CxScannerService;
+import com.checkmarx.flow.service.GitHubAppAuthService;
 import com.checkmarx.flow.service.GitHubService;
 import com.checkmarx.flow.service.ThresholdValidator;
 import com.checkmarx.flow.service.ResultsService;
 import com.checkmarx.flow.utils.AesEncryptionUtils;
 import com.checkmarx.sdk.config.Constants;
 import com.checkmarx.sdk.config.CxProperties;
-import com.checkmarx.sdk.dto.Filter;
+import com.checkmarx.sdk.dto.sast.Filter;
 import com.checkmarx.sdk.dto.ScanResults;
 import com.checkmarx.sdk.dto.cx.CxScanSummary;
-import com.checkmarx.sdk.dto.ast.SCAResults;
-import com.checkmarx.sdk.dto.ast.Summary;
+import com.checkmarx.sdk.dto.sca.SCAResults;
+
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
+import com.checkmarx.sdk.dto.sca.Summary;
 import com.checkmarx.sdk.exception.CheckmarxException;
-import com.checkmarx.sdk.service.CxClient;
+import com.checkmarx.sdk.service.scanner.CxClient;
+import com.checkmarx.sdk.service.CxService;
 import com.checkmarx.test.flow.config.CxFlowMocksConfig;
-import com.cx.restclient.dto.scansummary.Severity;
-import com.cx.restclient.ast.dto.sca.report.Finding;
+import com.checkmarx.sdk.dto.scansummary.Severity;
+import com.checkmarx.sdk.dto.sca.report.Finding;
 import io.cucumber.java.Before;
 import io.cucumber.java.en.And;
 import io.cucumber.java.en.Given;
@@ -63,10 +68,12 @@ public class AnalyticsSteps {
     private final GitHubProperties gitHubProperties;
     private final FlowProperties flowProperties;
     private final ThresholdValidator thresholdValidator;
+    private final ScmConfigOverrider scmConfigOverrider;
 
-    private final CxClient cxClientMock;
+    private final CxService cxClientMock;
     private final CxProperties cxProperties;
     private final RestTemplate restTemplateMock;
+    private final GitHubAppAuthService gitHubAppAuthService;
 
     private static class State {
         ScanResults scanResultsToInject;
@@ -214,8 +221,7 @@ public class AnalyticsSteps {
     }
 
     private ResponseEntity<String> createResponseForGetComments() {
-        ResponseEntity<String> result = new ResponseEntity<>("{}", HttpStatus.OK);
-        return result;
+        return ResponseEntity.ok("{}");
     }
 
     private void initMock(CxClient cxClientMock) {
@@ -231,10 +237,15 @@ public class AnalyticsSteps {
         GitHubService gitService = new GitHubService(restTemplateMock,
                 gitHubProperties,
                 flowProperties,
-                thresholdValidator);
+                thresholdValidator,
+                scmConfigOverrider,
+                gitHubAppAuthService);
+                
+        
+        CxScannerService cxScannerService = new CxScannerService(cxProperties,null, null, cxClientMock, null );
 
         return new ResultsService(
-                cxClientMock,
+                cxScannerService,
                 null,
                 null,
                 null,
@@ -242,9 +253,7 @@ public class AnalyticsSteps {
                 null,
                 null,
                 null,
-                null,
-                cxProperties,
-                flowProperties);
+                null);
     }
 
     private static ScanResults createFakeSASTScanResults(Map<FindingSeverity, Integer> findingsPerSeverity) {
@@ -269,13 +278,13 @@ public class AnalyticsSteps {
 
     private static ScanResults createFakeSCAScanResults(Map<FindingSeverity, Integer> findingsPerSeverity, int scanId) {
 
-        Map<Filter.Severity, Integer> findingCounts= new HashMap<Filter.Severity, Integer>() ;
+        Map<Filter.Severity, Integer> findingCounts= new HashMap<>() ;
 
         SCAResults scaResults = new SCAResults();
 
         scaResults.setScanId("" + scanId);
 
-        List<Finding> findings = new LinkedList<Finding>();
+        List<Finding> findings = new LinkedList<>();
         addFinding(findingsPerSeverity.get(FindingSeverity.HIGH), findingCounts, findings, Severity.HIGH, Filter.Severity.HIGH);
         addFinding(findingsPerSeverity.get(FindingSeverity.MEDIUM), findingCounts, findings, Severity.MEDIUM, Filter.Severity.MEDIUM);
         addFinding(findingsPerSeverity.get(FindingSeverity.LOW), findingCounts, findings, Severity.LOW, Filter.Severity.LOW);

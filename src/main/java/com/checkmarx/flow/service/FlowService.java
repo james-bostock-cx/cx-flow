@@ -5,13 +5,13 @@ import com.checkmarx.flow.exception.MachinaRuntimeException;
 import com.checkmarx.sdk.dto.ScanResults;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.collections.CollectionUtils;
+import org.apache.commons.collections4.CollectionUtils;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
-import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * High level business logic for CxFlow automation.
@@ -40,6 +40,13 @@ public class FlowService {
     }
 
     private void validateEnabledScanners(List<VulnerabilityScanner> enabledScanners) {
+
+        boolean isCxGoEnabled = enabledScanners.stream().anyMatch(scanner -> scanner instanceof CxGoScanner);
+
+        if (isCxGoEnabled && enabledScanners.size() > 1) {
+            throw new MachinaRuntimeException("CxGo scanner cannot be set with any other scanner");
+        }
+
         boolean isSastAndASTScannersFound = enabledScanners.stream().anyMatch(scanner -> scanner instanceof ASTScanner)
                 && enabledScanners.stream().anyMatch(scanner -> scanner instanceof SastScanner);
         if (isSastAndASTScannersFound) {
@@ -72,5 +79,20 @@ public class FlowService {
         }
 
         return enabledScanners;
+    }
+
+    public void deleteProject(ScanRequest request) {
+
+        Optional<SastScanner> sastScanner = getEnabledScanners(request)
+                .stream().filter(scanner -> scanner instanceof SastScanner)
+                .map(scanner -> ((SastScanner) scanner))
+                .findFirst();
+
+        if(!sastScanner.isPresent()){
+            log.warn("Delete branch for non-SAST scanner is not supported");
+            return;
+         }
+
+        sastScanner.ifPresent(scanner -> scanner.deleteProject(request));
     }
 }

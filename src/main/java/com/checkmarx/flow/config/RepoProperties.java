@@ -1,12 +1,13 @@
 package com.checkmarx.flow.config;
 
-import lombok.Getter;
-import lombok.Setter;
+import com.checkmarx.flow.service.PullRequestCommentsHelper;
 import org.apache.commons.lang3.StringUtils;
 
 import javax.annotation.PostConstruct;
+import java.util.Map;
 
 public class RepoProperties {
+
     private boolean enabled;
     private String webhookToken;
     private String token;
@@ -21,11 +22,19 @@ public class RepoProperties {
     private boolean blockMerge = false;
     private boolean errorMerge = false;
     private boolean detailed = true;
-    private String detailHeader = "Details";
     private boolean flowSummary = true;
-    private String flowSummaryHeader = "Violation Summary";
+    private String flowSummaryHeader = PullRequestCommentsHelper.COMMENT_TYPE_SAST_FINDINGS_2;
     private boolean cxSummary = false;
     private String cxSummaryHeader = "Checkmarx Scan Summary";
+    private Map<String, OptionalScmInstanceProperties> optionalInstances;
+
+    public Map<String, OptionalScmInstanceProperties> getOptionalInstances() {
+        return optionalInstances;
+    }
+
+    public void setOptionalInstances(Map<String, OptionalScmInstanceProperties> optionalInstances) {
+        this.optionalInstances = optionalInstances;
+    }
 
     public boolean isEnabled() {
         return enabled;
@@ -148,14 +157,6 @@ public class RepoProperties {
 
     public void setFlowSummary(boolean flowSummary) {
         this.flowSummary = flowSummary;
-    }
-
-    public String getDetailHeader() {
-        return detailHeader;
-    }
-
-    public void setDetailHeader(String detailHeader) {
-        this.detailHeader = detailHeader;
     }
 
     public String getFlowSummaryHeader() {

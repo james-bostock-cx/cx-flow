@@ -1,11 +1,13 @@
 buildscript {
     ext {
-        CxSBSDK = "0.4.36w"
+        CxSBSDK = "0.4.94w"
+        ConfigProviderVersion = "1.0.10"
         //cxVersion = "8.90.5"
-        springBootVersion = '2.2.6.RELEASE'
+        springBootVersion = '2.3.5.RELEASE'
         sonarqubeVersion = '2.8'
         atlassianVersion = "5.2.0"
         atlassianFugueVersion = "4.7.2"
+        jacksonVersion = "2.12.1"
         mainClass = 'com.checkmarx.flow.CxFlowApplication'
     }
     repositories {
@@ -46,10 +48,11 @@ apply plugin: 'io.spring.dependency-management'
 apply plugin: 'com.gorylenko.gradle-git-properties'
 
 group = 'com.checkmarx'
-version = '1.6.5w'
+version = file('version.txt').text.trim()
+
 sourceCompatibility = 1.8
 def cucumberVersion = '5.7.0'
-def junitVersion = '5.5.0'
+def junitVersion = '5.7.0'
 
 repositories {
     mavenLocal()
@@ -70,29 +73,46 @@ configurations {
 }
 
 dependencies {
+    compile group: 'com.beust', name: 'jcommander', version: '1.78'
+    compile('org.apache.ant:ant:1.10.9')
     compile('org.springframework.boot:spring-boot-starter-actuator')
     compile('org.springframework.boot:spring-boot-starter-web')
     compile('org.springframework.boot:spring-boot-starter-aop')
-    compile("com.github.checkmarx-ts:cx-spring-boot-sdk:${CxSBSDK}")
+    compile('org.springframework.boot:spring-boot-starter-validation')
+    compile("com.github.checkmarx-ltd:cx-spring-boot-sdk:${CxSBSDK}") {
+        exclude group: 'org.apache.ant', module: 'ant'
+    }
     compile("org.apache.commons:commons-text:1.8")
     compile('commons-codec:commons-codec:1.13')
     compile('commons-io:commons-io:2.7')
     compile('org.apache.commons:commons-lang3:3.9')
-    compile('org.json:json:20190722')
+    compile('org.apache.commons:commons-collections4:4.4')
+    compile('org.json:json:20201115')
     compile('com.fasterxml.jackson.core:jackson-databind:2.10.3')
     compile('org.springframework.boot:spring-boot-starter-web-services')
     compile('org.springframework.boot:spring-boot-starter-mail')
     compile('org.springframework.boot:spring-boot-starter-thymeleaf')
     compile('com.github.ulisesbocchio:jasypt-spring-boot-starter:2.1.2')
     compile("io.atlassian.fugue:fugue:${atlassianFugueVersion}")
-    compile("com.atlassian.jira:jira-rest-java-client-core:${atlassianVersion}")
+    compile("com.atlassian.jira:jira-rest-java-client-core:${atlassianVersion}") {
+        exclude group: 'org.codehaus.jackson', module: 'jackson-mapper-asl'
+        exclude group: 'org.codehaus.jackson', module: 'jackson-core-asl'
+    }
     compile("com.atlassian.jira:jira-rest-java-client-api:${atlassianVersion}")
+    compile("com.fasterxml.jackson.core:jackson-databind:${jacksonVersion}")
+    compile("com.fasterxml.jackson.core:jackson-core:${jacksonVersion}")
+    compile("com.fasterxml.jackson.core:jackson-annotations:${jacksonVersion}")
     compile("org.apache.httpcomponents:httpclient:4.5.10")
     compile("org.thymeleaf:thymeleaf:3.0.11.RELEASE")
-    compile("org.codehaus.groovy:groovy-all:2.5.8")
+    compile("org.codehaus.groovy:groovy-all:3.0.7") {
+        exclude group: 'org.apache.ant', module: 'ant'
+    }
     compile("org.apache.ivy:ivy:2.5.0")
     compile("org.jasypt:jasypt:1.9.3")
     compile("org.eclipse.jgit:org.eclipse.jgit:5.5.1.201910021850-r")
+    compile group: 'com.google.guava', name: 'guava', version: '30.1-jre'
+    compile group: 'org.bouncycastle', name: 'bcprov-jdk15on', version: '1.68'
+    compile("com.auth0:java-jwt:3.10.3")
     compileOnly('org.springframework.boot:spring-boot-configuration-processor')
     runtime('org.springframework.boot:spring-boot-devtools')
     testImplementation('org.springframework.boot:spring-boot-starter-test')
@@ -117,6 +137,10 @@ dependencies {
     compile("ch.qos.logback.contrib:logback-json-classic:0.1.5")
     compile("ch.qos.logback.contrib:logback-jackson:0.1.5")
     compile("net.logstash.logback:logstash-logback-encoder:5.2")
+    compile 'org.modelmapper:modelmapper:2.3.8'
+    compile("com.checkmarx:cx-config-provider:${ConfigProviderVersion}") {
+        exclude group: 'org.apache.logging.log4j', module: 'log4j-slf4j-impl'
+    }
 }
 
 springBoot {
@@ -196,7 +220,9 @@ task integrationTest(type: Test) {
         include 'com/checkmarx/flow/cucumber/integration/azure/publishing/**'
         include 'com/checkmarx/flow/cucumber/integration/azure/publishing/github2ado/*'
         include 'com/checkmarx/flow/cucumber/integration/cxconfig/*'
+        include 'com/checkmarx/flow/cucumber/integration/config_provider/**'
         include 'com/checkmarx/flow/cucumber/integration/cxconfigbugtracker/**'
+        include 'com/checkmarx/flow/cucumber/integration/multiScmInstances/**'
 
         testLogging {
             events "passed", "skipped", "failed"
@@ -209,7 +235,7 @@ task ScaIntegrationTest(type: Test) {
         systemProperty "testprofile", "scaIntegration"
 
         include 'com/checkmarx/flow/cucumber/integration/sca_scanner/**'
-        
+
         testLogging {
             events "passed", "skipped", "failed"
         }
@@ -221,7 +247,7 @@ task ASTIntegrationTest(type: Test) {
         systemProperty "testprofile", "astIntegration"
 
         include 'com/checkmarx/flow/cucumber/integration/ast/bugtrackers/jira/**'
-        exclude  'com/checkmarx/flow/cucumber/integration/ast/scans/**'
+        include  'com/checkmarx/flow/cucumber/integration/ast/scans/**'
 
         testLogging {
             events "passed", "skipped", "failed"
@@ -268,11 +294,47 @@ task SastCliIntegrationTest(type: Test) {
     }
 }
 
+task AstCliIntegrationTest(type: Test) {
+    useJUnitPlatform() {
+        systemProperty "testprofile", "astCliIntegration"
+
+        include 'com/checkmarx/flow/cucumber/integration/cli/ast/**'
+
+        testLogging {
+            events "passed", "skipped", "failed"
+        }
+    }
+}
+
 task ScaCliIntegrationTest(type: Test) {
     useJUnitPlatform() {
         systemProperty "testprofile", "scaCliIntegration"
 
         include 'com/checkmarx/flow/cucumber/integration/cli/sca/**'
+
+        testLogging {
+            events "passed", "skipped", "failed"
+        }
+    }
+}
+
+task CxGoIntegrationTest(type: Test) {
+    useJUnitPlatform() {
+        systemProperty "testprofile", "cxgoIntegration"
+
+        include 'com/checkmarx/flow/cucumber/integration/cxgo/**'
+
+        testLogging {
+            events "passed", "skipped", "failed"
+        }
+    }
+}
+
+task CodeBashingIntegrationTest(type: Test) {
+    useJUnitPlatform() {
+        systemProperty "testprofile", "codebashingIntegration"
+
+        include 'com/checkmarx/flow/cucumber/integration/codebashing/**'
 
         testLogging {
             events "passed", "skipped", "failed"
@@ -286,4 +348,3 @@ task getVersion {
         println "${version}"
     }
 }
-

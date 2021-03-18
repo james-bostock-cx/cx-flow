@@ -3,20 +3,22 @@ package com.checkmarx.flow.controller;
 import com.checkmarx.flow.config.ADOProperties;
 import com.checkmarx.flow.config.FlowProperties;
 import com.checkmarx.flow.config.JiraProperties;
-import com.checkmarx.flow.dto.*;
+import com.checkmarx.flow.config.ScmConfigOverrider;
+import com.checkmarx.flow.constants.FlowConstants;
+import com.checkmarx.flow.dto.BugTracker;
+import com.checkmarx.flow.dto.ControllerRequest;
+import com.checkmarx.flow.dto.EventResponse;
+import com.checkmarx.flow.dto.ScanRequest;
 import com.checkmarx.flow.dto.azure.*;
 import com.checkmarx.flow.exception.InvalidTokenException;
-import com.checkmarx.flow.service.ConfigurationOverrider;
-import com.checkmarx.flow.service.FilterFactory;
-import com.checkmarx.flow.service.FlowService;
-import com.checkmarx.flow.service.HelperService;
+import com.checkmarx.flow.service.*;
 import com.checkmarx.flow.utils.HTMLHelper;
 import com.checkmarx.flow.utils.ScanUtils;
-import com.checkmarx.sdk.config.CxProperties;
 import com.checkmarx.sdk.dto.filtering.FilterConfiguration;
+import com.checkmarx.sdk.dto.sast.CxConfig;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.slf4j.Logger;
 import org.slf4j.MDC;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -27,6 +29,7 @@ import java.util.*;
 /**
  * Handles Azure DevOps (ADO) webhook requests.
  */
+@Slf4j
 @RequiredArgsConstructor
 @RestController
 @RequestMapping(value = "/")
@@ -34,18 +37,21 @@ public class ADOController extends AdoControllerBase {
     private static final String HTTP = "http://";
     private static final String HTTPS = "https://";
     private static final List<String> PULL_EVENT = Arrays.asList("git.pullrequest.created", "git.pullrequest.updated");
+    private static final String BRANCH_DELETED_REF = StringUtils.repeat('0', 40);
     private static final String AUTHORIZATION = "authorization";
     private static final int NAMESPACE_INDEX = 3;
     private static final String EMPTY_STRING = "";
-    private static final Logger log = org.slf4j.LoggerFactory.getLogger(ADOController.class);
     private final ADOProperties properties;
     private final FlowProperties flowProperties;
-    private final CxProperties cxProperties;
     private final JiraProperties jiraProperties;
     private final FlowService flowService;
     private final HelperService helperService;
     private final FilterFactory filterFactory;
     private final ConfigurationOverrider configOverrider;
+    private final ADOService adoService;
+    private final ScmConfigOverrider scmConfigOverrider;
+    private final GitAuthUrlGenerator gitAuthUrlGenerator;
+
 
     /**
      * Pull Request event submitted (JSON)
@@ -59,10 +65,11 @@ public class ADOController extends AdoControllerBase {
             AdoDetailsRequest adoDetailsRequest
     ) {
         String uid = helperService.getShortUid();
-        MDC.put("cx", uid);
+        MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
         log.info("Processing Azure PULL request");
-        validateBasicAuth(auth);
+        Action action = Action.PULL;
         controllerRequest = ensureNotNull(controllerRequest);
+        validateBasicAuth(auth, controllerRequest);
         adoDetailsRequest = ensureDetailsNotNull(adoDetailsRequest);
         ResourceContainers resourceContainers = body.getResourceContainers();
 
@@ -73,8 +80,6 @@ public class ADOController extends AdoControllerBase {
                     .success(true)
                     .build());
         }
-
-        FlowOverride o = ScanUtils.getMachinaOverride(controllerRequest.getOverride());
 
         try {
             Resource resource = body.getResource();
@@ -103,7 +108,6 @@ public class ADOController extends AdoControllerBase {
 
             initAdoSpecificParams(adoDetailsRequest);
 
-
             if (StringUtils.isEmpty(product)) {
                 product = ScanRequest.Product.CX.getProduct();
             }
@@ -119,19 +123,11 @@ public class ADOController extends AdoControllerBase {
 
             FilterConfiguration filter = filterFactory.getFilter(controllerRequest, flowProperties);
 
-            setExclusionProperties(cxProperties, controllerRequest);
-
             //build request object
             String gitUrl = repository.getWebUrl();
-            String token = properties.getToken();
+            String token = scmConfigOverrider.determineConfigToken(properties, controllerRequest.getScmInstance());
             log.info("Using url: {}", gitUrl);
-            String gitAuthUrl = gitUrl.replace(HTTPS, HTTPS.concat(token).concat("@"));
-            gitAuthUrl = gitAuthUrl.replace(HTTP, HTTP.concat(token).concat("@"));
-
-            String scanPreset = cxProperties.getScanPreset();
-            if (StringUtils.isNotEmpty(controllerRequest.getPreset())) {
-                scanPreset = controllerRequest.getPreset();
-            }
+            String gitAuthUrl = gitAuthUrlGenerator.addCredToUrl(ScanRequest.Repository.ADO, gitUrl, token);
 
             ScanRequest request = ScanRequest.builder()
                     .application(app)
@@ -148,18 +144,22 @@ public class ADOController extends AdoControllerBase {
                     .mergeNoteUri(pullUrl.concat("/threads"))
                     .mergeTargetBranch(targetBranch)
                     .email(null)
-                    .incremental(isScanIncremental(controllerRequest, cxProperties))
-                    .scanPreset(scanPreset)
+                    .scanPreset(controllerRequest.getPreset())
+                    .incremental(controllerRequest.getIncremental())
                     .excludeFolders(controllerRequest.getExcludeFolders())
                     .excludeFiles(controllerRequest.getExcludeFiles())
                     .bugTracker(bt)
                     .filter(filter)
+                    .organizationId(determineNamespace(resourceContainers))
+                    .gitUrl(gitUrl)
                     .build();
 
-            request = configOverrider.overrideScanRequestProperties(o, request);
+            setScmInstance(controllerRequest, request);
+            request.putAdditionalMetadata(ADOService.PROJECT_SELF_URL, getTheProjectURL(body.getResourceContainers()));
+            fillRequestWithAdditionalData(request, repository, body.toString());
+            checkForConfigAsCode(request, getConfigBranch(request, resource, action));
             request.putAdditionalMetadata("statuses_url", pullUrl.concat("/statuses"));
             addMetadataToScanRequest(adoDetailsRequest, request);
-            request.putAdditionalMetadata(HTMLHelper.WEB_HOOK_PAYLOAD, body.toString());
             request.setId(uid);
             //only initiate scan/automation if target branch is applicable
             if (helperService.isBranch2Scan(request, branches)) {
@@ -172,6 +172,8 @@ public class ADOController extends AdoControllerBase {
 
         return getSuccessMessage();
     }
+
+
 
     /**
      * Push Request event submitted (JSON), along with the Product (cx for example)
@@ -186,14 +188,14 @@ public class ADOController extends AdoControllerBase {
     ) {
         //TODO handle different state (Active/Closed)
         String uid = helperService.getShortUid();
-        MDC.put("cx", uid);
+        MDC.put(FlowConstants.MAIN_MDC_ENTRY, uid);
         log.info("Processing Azure Push request");
-        validateBasicAuth(auth);
+        Action action = Action.PUSH;
+
         controllerRequest = ensureNotNull(controllerRequest);
+        validateBasicAuth(auth, controllerRequest);
         adoDetailsRequest = ensureDetailsNotNull(adoDetailsRequest);
         ResourceContainers resourceContainers = body.getResourceContainers();
-
-        FlowOverride o = ScanUtils.getMachinaOverride(controllerRequest.getOverride());
 
         try {
             Resource resource = body.getResource();
@@ -232,27 +234,14 @@ public class ADOController extends AdoControllerBase {
 
             FilterConfiguration filter = filterFactory.getFilter(controllerRequest, flowProperties);
 
-            setExclusionProperties(cxProperties, controllerRequest);
-
             List<String> emails = determineEmails(resource);
 
             //build request object
             String gitUrl = repository.getRemoteUrl();
             log.debug("Using url: {}", gitUrl);
-            String gitAuthUrl = gitUrl.replace(HTTPS, HTTPS.concat(properties.getToken()).concat("@"));
-            gitAuthUrl = gitAuthUrl.replace(HTTP, HTTP.concat(properties.getToken()).concat("@"));
-
-            String scanPreset = cxProperties.getScanPreset();
-            if (StringUtils.isNotEmpty(controllerRequest.getPreset())) {
-                scanPreset = controllerRequest.getPreset();
-            }
-
-            String defaultBranch = repository.getDefaultBranch();
-            String[] branchPath = repository.getDefaultBranch().split("/");
-
-            if (branchPath.length == 3) {
-                defaultBranch = branchPath[2];
-            }
+            String configToken = scmConfigOverrider.determineConfigToken(properties, controllerRequest.getScmInstance());
+            String gitAuthUrl = gitAuthUrlGenerator.addCredToUrl(ScanRequest.Repository.ADO, gitUrl, configToken);
+            String defaultBranch = ScanUtils.getBranchFromRef(Optional.ofNullable(repository.getDefaultBranch()).orElse(ref));
 
             ScanRequest request = ScanRequest.builder()
                     .application(app)
@@ -269,23 +258,29 @@ public class ADOController extends AdoControllerBase {
                     .defaultBranch(defaultBranch)
                     .refs(ref)
                     .email(emails)
-                    .incremental(isScanIncremental(controllerRequest, cxProperties))
-                    .scanPreset(scanPreset)
+                    .scanPreset(controllerRequest.getPreset())
+                    .incremental(controllerRequest.getIncremental())
                     .excludeFolders(controllerRequest.getExcludeFolders())
                     .excludeFiles(controllerRequest.getExcludeFiles())
                     .bugTracker(bt)
                     .filter(filter)
+                    .organizationId(determineNamespace(resourceContainers))
+                    .gitUrl(gitUrl)
                     .build();
 
+            setScmInstance(controllerRequest, request);
+            request.putAdditionalMetadata(ADOService.PROJECT_SELF_URL, getTheProjectURL(body.getResourceContainers()));
             addMetadataToScanRequest(adoDetailsRequest, request);
-            request.putAdditionalMetadata(HTMLHelper.WEB_HOOK_PAYLOAD, body.toString());
+            fillRequestWithAdditionalData(request,repository, body.toString());
             //if an override blob/file is provided, substitute these values
-            request = configOverrider.overrideScanRequestProperties(o, request);
-
+            checkForConfigAsCode(request, getConfigBranch(request, resource, action));
             request.setId(uid);
             //only initiate scan/automation if target branch is applicable
             if (helperService.isBranch2Scan(request, branches)) {
                 flowService.initiateAutomation(request);
+            }
+            else if(isDeleteBranchEvent(resource) && properties.getDeleteCxProject()){
+                flowService.deleteProject(request);
             }
 
         } catch (IllegalArgumentException e) {
@@ -295,6 +290,22 @@ public class ADOController extends AdoControllerBase {
         return getSuccessMessage();
     }
 
+    private boolean isDeleteBranchEvent(Resource resource){
+        if (resource.getRefUpdates().size() == 1){
+            String newBranchRef = resource.getRefUpdates().get(0).getNewObjectId();
+
+            if (newBranchRef.equals(BRANCH_DELETED_REF)){
+                log.info("new-branch ref is empty - detect ADO DELETE event");
+                return true;
+            }
+            return false;
+        }
+
+        int refCount = resource.getRefUpdates().size();
+        log.warn("unexpected number of refUpdates in push event: {}", refCount);
+
+        return false;
+    }
     private List<String> determineEmails(Resource resource) {
         List<String> emails = new ArrayList<>();
         if (resource.getCommits() != null) {
@@ -330,11 +341,25 @@ public class ADOController extends AdoControllerBase {
         return azureProject;
     }
 
+    private String getConfigBranch(ScanRequest request, Resource resource, Action action){
+        String branch = request.getBranch();
+        try{
+
+            if (isDeleteBranchEvent(resource) && action.equals(Action.PUSH)){
+                branch = request.getDefaultBranch();
+                log.debug("branch to read config-as-code: {}", branch);
+            }
+        }
+        catch (Exception ex){
+            log.info("failed to get branch for config as code. using default");
+        }
+        return branch;
+    }
     /**
      * Validates the base64 / basic auth received in the request.
      */
-    private void validateBasicAuth(String token) {
-        String auth = "Basic ".concat(Base64.getEncoder().encodeToString(properties.getWebhookToken().getBytes()));
+    private void validateBasicAuth(String token, ControllerRequest controllerRequest) {
+        String auth = "Basic ".concat(Base64.getEncoder().encodeToString(scmConfigOverrider.determineConfigWebhookToken(properties, controllerRequest).getBytes()));
         if (!auth.equals(token)) {
             throw new InvalidTokenException();
         }
@@ -353,5 +378,26 @@ public class ADOController extends AdoControllerBase {
         if (StringUtils.isEmpty(request.getAdoClosed())) {
             request.setAdoClosed(properties.getClosedStatus());
         }
+    }
+
+    private void checkForConfigAsCode(ScanRequest request, String branch) {
+        CxConfig cxConfig = adoService.getCxConfigOverride(request, branch);
+        configOverrider.overrideScanRequestProperties(cxConfig, request);
+    }
+
+    private void fillRequestWithAdditionalData(ScanRequest request, Repository repository, String hookPayload) {
+        request.putAdditionalMetadata(ADOService.REPO_ID, repository.getId());
+        request.putAdditionalMetadata(ADOService.REPO_SELF_URL, repository.getUrl());
+        request.putAdditionalMetadata(HTMLHelper.WEB_HOOK_PAYLOAD, hookPayload);
+    }
+
+    private String getTheProjectURL(ResourceContainers resourceContainers) {
+        String projectId = resourceContainers.getProject().getId();
+        String baseUrl = resourceContainers.getProject().getBaseUrl();
+        return baseUrl.concat(projectId);
+    }
+    private enum Action {
+        PULL,
+        PUSH
     }
 }
