@@ -1,6 +1,6 @@
 buildscript {
     ext {
-        CxSBSDK = "0.4.93w"
+        CxSBSDK = "0.4.94w"
         ConfigProviderVersion = "1.0.10"
         //cxVersion = "8.90.5"
         springBootVersion = '2.3.5.RELEASE'
@@ -49,6 +49,10 @@ apply plugin: 'com.gorylenko.gradle-git-properties'
 
 group = 'com.checkmarx'
 version = file('version.txt').text.trim()
+<<<<<<< HEAD
+=======
+
+>>>>>>> woolworths
 sourceCompatibility = 1.8
 def cucumberVersion = '5.7.0'
 def junitVersion = '5.7.0'
