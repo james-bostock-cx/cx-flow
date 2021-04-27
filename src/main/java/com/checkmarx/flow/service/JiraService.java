@@ -901,6 +901,7 @@ public class JiraService {
     private Map<String, Issue> getJiraIssueMap(List<Issue> issues) {
         Map<String, Issue> jiraMap = new HashMap<>();
         for (Issue issue : issues) {
+            log.debug("Adding issue with summary \"{}\" to jiraMap", issue.getSummary());
             jiraMap.put(issue.getSummary(), issue);
         }
         return jiraMap;
@@ -1225,6 +1226,7 @@ public class JiraService {
 
                 /*Issue already exists -> update and comment*/
                 if (jiraMap.containsKey(issueCurrentKey)) {
+                    log.debug("Issue with key \"{}\" found in jiraMap", issueCurrentKey);
                     Issue issue = jiraMap.get(issueCurrentKey);
                     if (xIssue.getValue().isAllFalsePositive()) {
                         //All issues are false positive, so issue should be closed
@@ -1239,6 +1241,7 @@ public class JiraService {
                         log.info("Skipping issue marked as false-positive or has False Positive state with key {}", issueCurrentKey);
                     }
                 } else {
+                    log.debug("Issue with key \"{}\" not found in jiraMap", issueCurrentKey);
                     /*Create the new issue*/
                     if (!currentIssue.isAllFalsePositive() && (!jiraProperties.isChild() || (!parentCheck(issueCurrentKey, issuesParent) && !grandparentCheck(issueCurrentKey, issuesGrandParent)))) {
                         if (jiraProperties.isChild()) {
